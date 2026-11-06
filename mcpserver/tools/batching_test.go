@@ -337,3 +337,72 @@ func TestForEachParallel(t *testing.T) {
 	assert.LessOrEqual(t, peak.Load(), int32(apiParallelism))
 	assert.Greater(t, peak.Load(), int32(1), "work must actually run in parallel")
 }
+
+// The search endpoint answers with its first 60 hits unless asked for a
+// page; offsets past that must still reach the right results.
+func TestKeywordSearchPagesPastDefault(t *testing.T) {
+	const total = 150
+	channelID := model.NewId()
+	author := &model.User{Id: model.NewId(), Username: "alice"}
+	hits := make([]*model.Post, total)
+	for i := range hits {
+		// Newest first, as the server orders search hits.
+		hits[i] = &model.Post{Id: model.NewId(), ChannelId: channelID, UserId: author.Id, Message: fmt.Sprintf("hit-%03d", i), CreateAt: int64(10_000 - i)}
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/posts/search", func(w http.ResponseWriter, r *http.Request) {
+		var params model.SearchParameter
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&params))
+		page, perPage := 0, 60
+		if params.Page != nil {
+			page = *params.Page
+		}
+		if params.PerPage != nil {
+			perPage = *params.PerPage
+		}
+		list := model.NewPostList()
+		for i := page * perPage; i < min((page+1)*perPage, total); i++ {
+			list.AddPost(hits[i])
+			list.AddOrder(hits[i].Id)
+		}
+		writeTestJSON(w, list)
+	})
+	mux.HandleFunc("/api/v4/users/ids", usersByIDsHandler(t, []*model.User{author}))
+	mux.HandleFunc("/api/v4/channels/"+channelID, func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, &model.Channel{Id: channelID, DisplayName: "Ops", Type: model.ChannelTypeOpen})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	p := newTestProvider(t, ts.URL)
+	mcpCtx := &MCPToolContext{Ctx: t.Context(), Client: newTestClient(ts.URL), AccessMode: AccessModeLocal, UserID: model.NewId()}
+
+	tests := []struct {
+		name          string
+		offset, limit int
+		first, last   int // expected hit indexes; -1 for no results
+	}{
+		{"first page", 0, 10, 0, 9},
+		{"window past the default 60", 70, 10, 70, 79},
+		{"window spanning two pages", 95, 10, 95, 104},
+		{"tail shorter than limit", 145, 10, 145, 149},
+		{"offset past the end", 150, 10, -1, -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := p.toolCombinedSearch(mcpCtx, CombinedSearchArgs{Query: "hit", KeywordOffset: tt.offset, KeywordLimit: tt.limit})
+			require.NoError(t, err)
+			if tt.first < 0 {
+				assert.NotContains(t, out, "hit-")
+				return
+			}
+			assert.Contains(t, out, fmt.Sprintf("hit-%03d", tt.first))
+			assert.Contains(t, out, fmt.Sprintf("hit-%03d", tt.last))
+			if tt.first > 0 {
+				assert.NotContains(t, out, fmt.Sprintf("hit-%03d", tt.first-1))
+			}
+			assert.NotContains(t, out, fmt.Sprintf("hit-%03d", tt.last+1))
+		})
+	}
+}

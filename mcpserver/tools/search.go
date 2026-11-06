@@ -343,6 +343,47 @@ func (p *MattermostToolProvider) executeSemanticSearch(ctx context.Context, clie
 	return postResults, nil
 }
 
+// searchPostsWindow returns the keyword search hits at positions
+// [offset, offset+limit) in the server's newest-first order. Without explicit
+// paging the search endpoint returns only its first 60 hits, so offsets past
+// that would always come back empty. The window is read as one or two pages
+// of size limit, fetched together.
+func searchPostsWindow(ctx context.Context, client *model.Client4, teamID, terms string, offset, limit int) ([]*model.Post, error) {
+	firstPage := offset / limit
+	lastPage := (offset + limit - 1) / limit
+	pages := make([]*model.PostList, lastPage-firstPage+1)
+	errs := make([]error, len(pages))
+	isOr := false
+	forEachParallel(len(pages), func(i int) {
+		page, perPage := firstPage+i, limit
+		pages[i], _, errs[i] = client.SearchPostsWithParams(ctx, teamID, &model.SearchParameter{
+			Terms: &terms, IsOrSearch: &isOr, Page: &page, PerPage: &perPage,
+		})
+	})
+
+	var hits []*model.Post
+	for i, list := range pages {
+		if errs[i] != nil {
+			return nil, errs[i]
+		}
+		for _, id := range list.Order {
+			if post := list.Posts[id]; post != nil {
+				hits = append(hits, post)
+			}
+		}
+	}
+
+	skip := offset - firstPage*limit
+	if skip >= len(hits) {
+		return nil, nil
+	}
+	hits = hits[skip:]
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	return hits, nil
+}
+
 // executeKeywordSearch runs the Mattermost keyword search and returns enriched results.
 func (p *MattermostToolProvider) executeKeywordSearch(ctx context.Context, client *model.Client4, args CombinedSearchArgs, userID string) ([]searchPostResult, error) {
 	searchTerm := args.Query
@@ -371,13 +412,13 @@ func (p *MattermostToolProvider) executeKeywordSearch(ctx context.Context, clien
 		teamID = inChannelTeamID
 	}
 
-	searchResults, _, err := client.SearchPosts(ctx, teamID, searchTerm, false)
+	window, err := searchPostsWindow(ctx, client, teamID, searchTerm, args.KeywordOffset, args.KeywordLimit)
 	if err != nil {
 		return nil, err
 	}
 
-	posts := make([]*model.Post, 0, len(searchResults.Posts))
-	for _, post := range searchResults.Posts {
+	posts := make([]*model.Post, 0, len(window))
+	for _, post := range window {
 		if args.ChannelID != "" && post.ChannelId != args.ChannelID {
 			continue
 		}
@@ -391,12 +432,6 @@ func (p *MattermostToolProvider) executeKeywordSearch(ctx context.Context, clien
 	slices.SortFunc(posts, func(a, b *model.Post) int {
 		return cmp.Or(cmp.Compare(b.CreateAt, a.CreateAt), cmp.Compare(b.Id, a.Id))
 	})
-
-	if args.KeywordOffset > 0 && args.KeywordOffset < len(posts) {
-		posts = posts[args.KeywordOffset:]
-	} else if args.KeywordOffset >= len(posts) {
-		return nil, nil
-	}
 
 	if len(posts) > args.KeywordLimit {
 		posts = posts[:args.KeywordLimit]
