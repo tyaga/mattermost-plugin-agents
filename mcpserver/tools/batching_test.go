@@ -516,3 +516,31 @@ func TestListingAuthorsBatched(t *testing.T) {
 		})
 	}
 }
+
+func TestToolGroupFilter(t *testing.T) {
+	tests := []struct {
+		name     string
+		groups   []string
+		readOnly bool
+		want     []string
+		notWant  []string
+	}{
+		{"default registers everything", nil, false, []string{"read_channel", "create_post", "search_posts", "get_me"}, nil},
+		{"groups limit the catalog", []string{"channels", "search"}, false, []string{"read_channel", "get_active_channels", "search_posts", "create_channel"}, []string{"create_post", "get_me"}},
+		{"read-only drops state-changing tools", []string{"channels", "posts"}, true, []string{"read_channel", "read_post"}, []string{"create_channel", "create_post", "dm"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &MattermostToolProvider{accessMode: AccessModeLocal, toolGroupFilter: tt.groups, readOnlyTools: tt.readOnly, logger: &testLogger{t: t}}
+			names := p.ToolNames()
+			for _, want := range tt.want {
+				assert.Contains(t, names, want)
+			}
+			for _, notWant := range tt.notWant {
+				assert.NotContains(t, names, notWant)
+			}
+		})
+	}
+	assert.Contains(t, ToolGroupNames(), "channels")
+	assert.Contains(t, ToolGroupNames(), "dev")
+}

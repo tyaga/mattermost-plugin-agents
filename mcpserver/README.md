@@ -169,6 +169,9 @@ Create a post as a specific user using username/password login. Simply provide t
 - `--logfile`: Path to log file (logs to file in addition to stderr, JSON format)
 - `--debug`: Enable debug logging (recommended for troubleshooting)
 - `--dev`: Enable development mode with additional tools for setting up test data
+- `--compact`: Render posts in tool results as a one-line header (time, author, IDs) followed by the message, instead of one labeled line per field (or set `MM_COMPACT_OUTPUT=true`)
+- `--tools`: Comma-separated tool groups to register, e.g. `channels,posts,threads,search` (or set `MM_TOOL_GROUPS`); `--help` lists the groups. Fewer tools mean a smaller tool catalog for the client to load and search
+- `--read-only`: Register only tools that retrieve data (or set `MM_READ_ONLY=true`)
 - `--version`: Show version information
 
 **HTTP Transport Options** (when `--transport=http` — development and local use only, not for production; see the intro):

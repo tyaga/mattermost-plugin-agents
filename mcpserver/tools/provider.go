@@ -98,6 +98,11 @@ type ServerConfig interface {
 	GetDevMode() bool
 	GetTrackAIGenerated() bool
 	GetCompactOutput() bool
+
+	// GetToolGroups names the tool groups to register; empty means all.
+	GetToolGroups() []string
+	// GetReadOnlyTools drops tools that change state in Mattermost.
+	GetReadOnlyTools() bool
 }
 
 // SemanticSearchService provides semantic search capabilities for the MCP server.
@@ -117,6 +122,8 @@ type MattermostToolProvider struct {
 	accessMode              AccessMode
 	trackAIGenerated        bool                  // Whether to add ai_generated_by props to posts
 	compactOutput           bool                  // Render posts in the compact layout
+	toolGroupFilter         []string              // Tool groups to register; empty means all
+	readOnlyTools           bool                  // Register only tools that retrieve data
 	searchService           SemanticSearchService // Optional semantic search service, can be nil
 	fileContentService      FileContentService    // Optional file content service for read_file, can be nil
 	allowStateChangingTools func() bool           // Evaluated per request; nil fails closed
@@ -143,42 +150,77 @@ func NewMattermostToolProvider(authProvider auth.AuthenticationProvider, logger 
 		accessMode:              accessMode,
 		trackAIGenerated:        config.GetTrackAIGenerated(),
 		compactOutput:           config.GetCompactOutput(),
+		toolGroupFilter:         config.GetToolGroups(),
+		readOnlyTools:           config.GetReadOnlyTools(),
 		searchService:           searchService,
 		fileContentService:      fileContentService,
 		allowStateChangingTools: allowStateChangingTools,
 	}
 }
 
-func (p *MattermostToolProvider) mcpTools() []MCPTool {
-	// Tool groups in registration order.
-	groups := []func() []MCPTool{
-		p.getPostTools,
-		p.getScheduledPostTools,
-		p.getDraftTools,
-		p.getReactionTools,
-		p.getThreadTools,
-		p.getChannelTools,
-		p.getChannelMemberTools,
-		p.getBookmarkTools,
-		p.getUserTools,
-		p.getStatusTools,
-		p.getTeamTools,
-		p.getSearchTools,
-		p.getFileTools,
-		p.getIntegrationTools,
-		p.getGroupTools,
-		p.getRoleTools,
-		p.getAgentTools,
+// toolGroup is a named set of tools that can be enabled as a unit.
+type toolGroup struct {
+	name  string
+	tools func() []MCPTool
+}
+
+// toolGroups lists the tool groups in registration order.
+func (p *MattermostToolProvider) toolGroups() []toolGroup {
+	groups := []toolGroup{
+		{"posts", p.getPostTools},
+		{"scheduled_posts", p.getScheduledPostTools},
+		{"drafts", p.getDraftTools},
+		{"reactions", p.getReactionTools},
+		{"threads", p.getThreadTools},
+		{"channels", p.getChannelTools},
+		{"channel_members", p.getChannelMemberTools},
+		{"bookmarks", p.getBookmarkTools},
+		{"users", p.getUserTools},
+		{"status", p.getStatusTools},
+		{"teams", p.getTeamTools},
+		{"search", p.getSearchTools},
+		{"files", p.getFileTools},
+		{"integrations", p.getIntegrationTools},
+		{"groups", p.getGroupTools},
+		{"roles", p.getRoleTools},
+		{"agents", p.getAgentTools},
 	}
 
 	// Dev tools are only exposed when dev mode is enabled.
 	if p.devMode {
-		groups = append(groups, p.getDevUserTools, p.getDevPostTools, p.getDevTeamTools)
+		groups = append(groups,
+			toolGroup{"dev", p.getDevUserTools},
+			toolGroup{"dev", p.getDevPostTools},
+			toolGroup{"dev", p.getDevTeamTools},
+		)
 	}
+	return groups
+}
 
+// ToolGroupNames returns the names accepted by the tool group filter.
+func ToolGroupNames() []string {
+	p := &MattermostToolProvider{devMode: true}
+	var names []string
+	for _, group := range p.toolGroups() {
+		if !slices.Contains(names, group.name) {
+			names = append(names, group.name)
+		}
+	}
+	return names
+}
+
+func (p *MattermostToolProvider) mcpTools() []MCPTool {
 	var mcpTools []MCPTool
-	for _, group := range groups {
-		mcpTools = append(mcpTools, group()...)
+	for _, group := range p.toolGroups() {
+		if len(p.toolGroupFilter) > 0 && !slices.Contains(p.toolGroupFilter, group.name) {
+			continue
+		}
+		for _, tool := range group.tools() {
+			if p.readOnlyTools && !tool.ReadOnly {
+				continue
+			}
+			mcpTools = append(mcpTools, tool)
+		}
 	}
 	return mcpTools
 }

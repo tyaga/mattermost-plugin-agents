@@ -6,10 +6,13 @@ package main
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/mattermost/mattermost-plugin-agents/v2/mcpserver"
 	loggerlib "github.com/mattermost/mattermost-plugin-agents/v2/mcpserver/logger"
+	"github.com/mattermost/mattermost-plugin-agents/v2/mcpserver/tools"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +31,8 @@ var (
 	siteURL             string
 	trackAIGenerated    *bool // Pointer to distinguish unset from false
 	compactOutput       bool
+	toolGroups          []string
+	readOnlyTools       bool
 )
 
 func main() {
@@ -58,6 +63,9 @@ Authentication is handled via Personal Access Tokens (PAT).`,
 	rootCmd.Flags().Bool("stateless", false, "Enable stateless mode for multi-node/HA deployments (no server-side session tracking)")
 
 	rootCmd.Flags().BoolVar(&compactOutput, "compact", false, "Render posts in tool results as a one-line header plus the message (fewer tokens; or set MM_COMPACT_OUTPUT=true)")
+
+	rootCmd.Flags().StringSliceVar(&toolGroups, "tools", nil, "Comma-separated tool groups to register (default: all; or set MM_TOOL_GROUPS). Groups: "+strings.Join(tools.ToolGroupNames(), ", "))
+	rootCmd.Flags().BoolVar(&readOnlyTools, "read-only", false, "Register only tools that retrieve data (or set MM_READ_ONLY=true)")
 
 	// AI tracking flag
 	rootCmd.Flags().Bool("track-ai-generated", false, "Track AI-generated content in posts (default: false for stdio, true for http)")
@@ -95,6 +103,23 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	if mmInternalServerURL == "" {
 		mmInternalServerURL = os.Getenv("MM_INTERNAL_SERVER_URL")
+	}
+
+	if !cmd.Flags().Changed("tools") {
+		if env := os.Getenv("MM_TOOL_GROUPS"); env != "" {
+			toolGroups = strings.Split(env, ",")
+		}
+	}
+	for i, group := range toolGroups {
+		toolGroups[i] = strings.TrimSpace(group)
+		if !slices.Contains(tools.ToolGroupNames(), toolGroups[i]) {
+			logger.Error("unknown tool group", "group", toolGroups[i])
+			logger.Flush()
+			return fmt.Errorf("unknown tool group %q (known: %s)", toolGroups[i], strings.Join(tools.ToolGroupNames(), ", "))
+		}
+	}
+	if !cmd.Flags().Changed("read-only") {
+		readOnlyTools, _ = strconv.ParseBool(os.Getenv("MM_READ_ONLY"))
 	}
 
 	if !cmd.Flags().Changed("compact") {
@@ -141,6 +166,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 			DevMode:             devMode,
 			TrackAIGenerated:    trackAIGenerated,
 			CompactOutput:       compactOutput,
+			ToolGroups:          toolGroups,
+			ReadOnlyTools:       readOnlyTools,
 			PersonalAccessToken: token,
 		}
 
@@ -154,6 +181,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 			DevMode:             devMode,
 			TrackAIGenerated:    trackAIGenerated,
 			CompactOutput:       compactOutput,
+			ToolGroups:          toolGroups,
+			ReadOnlyTools:       readOnlyTools,
 			HTTPPort:            httpPort,
 			HTTPBindAddr:        httpBindAddr,
 			SiteURL:             siteURL,

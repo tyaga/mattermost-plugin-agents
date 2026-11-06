@@ -24,6 +24,13 @@ type BaseConfig struct {
 	// CompactOutput renders posts in tool results as a one-line header plus
 	// the message instead of one labeled line per field.
 	CompactOutput bool `json:"compact_output,omitempty"`
+
+	// ToolGroups limits the registered tools to these groups (see
+	// tools.ToolGroupNames); empty registers every group.
+	ToolGroups []string `json:"tool_groups,omitempty"`
+
+	// ReadOnlyTools registers only tools that retrieve data.
+	ReadOnlyTools bool `json:"read_only_tools,omitempty"`
 }
 
 // GetMMServerURL returns the Mattermost server URL
@@ -43,6 +50,16 @@ func (c BaseConfig) GetMMInternalServerURL() string {
 // GetDevMode returns the development mode setting
 func (c BaseConfig) GetDevMode() bool {
 	return c.DevMode
+}
+
+// GetToolGroups returns the tool groups to register; empty means all.
+func (c BaseConfig) GetToolGroups() []string {
+	return c.ToolGroups
+}
+
+// GetReadOnlyTools returns whether only data-retrieving tools are registered.
+func (c BaseConfig) GetReadOnlyTools() bool {
+	return c.ReadOnlyTools
 }
 
 // GetCompactOutput returns whether tool results use the compact post layout.
