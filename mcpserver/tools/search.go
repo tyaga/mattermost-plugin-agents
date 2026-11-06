@@ -116,7 +116,7 @@ func buildSearchTermWithChannel(query, channelName string) string {
 // either a channel name or a channel ID; an ID is resolved to its URL name so the
 // modifier matches, and the channel's team ID is returned so the search can be
 // scoped to it. Modifiers only affect the keyword search leg.
-func (p *MattermostToolProvider) applySearchModifiers(ctx context.Context, client *model.Client4, term string, args CombinedSearchArgs) (string, string) {
+func (p *MattermostToolProvider) applySearchModifiers(ctx context.Context, client *model.Client4, userID, term string, args CombinedSearchArgs) (string, string) {
 	var modifiers []string
 	inChannelTeamID := ""
 
@@ -128,7 +128,7 @@ func (p *MattermostToolProvider) applySearchModifiers(ctx context.Context, clien
 		channelName := in
 		resolved := true
 		if model.IsValidId(in) {
-			if channel, _, err := client.GetChannel(ctx, in); err == nil {
+			if channel, err := p.channel(ctx, client, userID, in); err == nil {
 				channelName = channel.Name
 				inChannelTeamID = channel.TeamId
 			} else {
@@ -407,7 +407,7 @@ func (p *MattermostToolProvider) executeKeywordSearch(ctx context.Context, clien
 
 	// Prepend structured search modifiers (Mattermost search grammar). These
 	// constrain the keyword leg only; semantic search ignores them.
-	searchTerm, inChannelTeamID := p.applySearchModifiers(ctx, client, searchTerm, args)
+	searchTerm, inChannelTeamID := p.applySearchModifiers(ctx, client, userID, searchTerm, args)
 	if teamID == "" {
 		teamID = inChannelTeamID
 	}

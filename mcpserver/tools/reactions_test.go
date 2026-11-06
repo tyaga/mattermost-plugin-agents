@@ -114,10 +114,7 @@ func TestToolListCustomEmoji(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode([]*model.Emoji{{Id: model.NewId(), Name: "party_parrot", CreatorId: creatorID}})
 	})
-	mux.HandleFunc(fmt.Sprintf("/api/v4/users/%s", creatorID), func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(&model.User{Id: creatorID, Username: "maker"})
-	})
+	mux.HandleFunc("/api/v4/users/ids", usersByIDsHandler(t, []*model.User{{Id: creatorID, Username: "maker"}}))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 

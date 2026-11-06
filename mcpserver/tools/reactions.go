@@ -192,13 +192,19 @@ func (p *MattermostToolProvider) formatEmojiList(mcpContext *MCPToolContext, emo
 		return "no custom emoji found"
 	}
 
+	creatorIDs := make([]string, len(emojis))
+	for i, emoji := range emojis {
+		creatorIDs[i] = emoji.CreatorId
+	}
+	creators := p.usernamesByIDs(mcpContext.Ctx, mcpContext.Client, creatorIDs)
+
 	var result strings.Builder
 	fmt.Fprintf(&result, "Found %d custom emoji:\n\n", len(emojis))
 	for i, emoji := range emojis {
 		format.WriteEmoji(&result, format.EmojiEntry{
 			HeaderLabel: fmt.Sprintf("Emoji %d", i+1),
 			Emoji:       emoji,
-			CreatorName: p.usernameFor(mcpContext.Ctx, mcpContext.Client, emoji.CreatorId),
+			CreatorName: creators[emoji.CreatorId],
 		})
 	}
 	return result.String()

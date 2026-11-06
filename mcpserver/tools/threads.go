@@ -130,10 +130,17 @@ func (p *MattermostToolProvider) toolGetThreads(mcpContext *MCPToolContext, args
 	var result strings.Builder
 	fmt.Fprintf(&result, "Threads inbox: %d total, %d unread threads, %d unread mentions\n\n",
 		threads.Total, threads.TotalUnreadThreads, threads.TotalUnreadMentions)
+	authorIDs := make([]string, 0, len(threads.Threads))
+	for _, tr := range threads.Threads {
+		if tr.Post != nil {
+			authorIDs = append(authorIDs, tr.Post.UserId)
+		}
+	}
+	usernames := p.usernamesByIDs(mcpContext.Ctx, mcpContext.Client, authorIDs)
 	for i, tr := range threads.Threads {
 		username := ""
 		if tr.Post != nil {
-			username = p.usernameFor(mcpContext.Ctx, mcpContext.Client, tr.Post.UserId)
+			username = usernames[tr.Post.UserId]
 		}
 		format.WriteThreadSummary(&result, format.ThreadSummaryEntry{
 			HeaderLabel: fmt.Sprintf("Thread %d", i+1),

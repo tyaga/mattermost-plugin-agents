@@ -459,3 +459,60 @@ func TestReadPostThreadLimit(t *testing.T) {
 		})
 	}
 }
+
+// Thread and emoji listings resolve their authors in one request.
+func TestListingAuthorsBatched(t *testing.T) {
+	teamID := model.NewId()
+	userID := model.NewId()
+	authors := []*model.User{{Id: model.NewId(), Username: "alice"}, {Id: model.NewId(), Username: "bob"}}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/users/ids", usersByIDsHandler(t, authors))
+	mux.HandleFunc(fmt.Sprintf("/api/v4/users/%s/teams/%s/threads", userID, teamID), func(w http.ResponseWriter, _ *http.Request) {
+		threads := &model.Threads{Total: 3}
+		for i, author := range []*model.User{authors[0], authors[1], authors[0]} {
+			threads.Threads = append(threads.Threads, &model.ThreadResponse{
+				PostId: model.NewId(),
+				Post:   &model.Post{Id: model.NewId(), UserId: author.Id, Message: fmt.Sprintf("thread %d", i)},
+			})
+		}
+		writeTestJSON(w, threads)
+	})
+	mux.HandleFunc("/api/v4/emoji", func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, []*model.Emoji{
+			{Id: model.NewId(), Name: "party", CreatorId: authors[0].Id},
+			{Id: model.NewId(), Name: "ship", CreatorId: authors[1].Id},
+		})
+	})
+	mux.HandleFunc("/api/v4/users/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("per-user lookup %s must not happen", r.URL.Path)
+		http.NotFound(w, r)
+	})
+
+	tests := []struct {
+		name string
+		call func(p *MattermostToolProvider, mcpCtx *MCPToolContext) (string, error)
+	}{
+		{"get_threads", func(p *MattermostToolProvider, mcpCtx *MCPToolContext) (string, error) {
+			return p.toolGetThreads(mcpCtx, GetThreadsArgs{TeamID: teamID})
+		}},
+		{"list_custom_emoji", func(p *MattermostToolProvider, mcpCtx *MCPToolContext) (string, error) {
+			return p.toolListCustomEmoji(mcpCtx, ListCustomEmojiArgs{})
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			counter := &requestCounter{}
+			ts := httptest.NewServer(counter.wrap(mux))
+			defer ts.Close()
+
+			p := newTestProvider(t, ts.URL)
+			mcpCtx := &MCPToolContext{Ctx: t.Context(), Client: newTestClient(ts.URL), UserID: userID}
+			out, err := tt.call(p, mcpCtx)
+			require.NoError(t, err)
+			assert.Contains(t, out, "alice")
+			assert.Contains(t, out, "bob")
+			assert.Equal(t, 1, counter.count("/api/v4/users/ids"))
+		})
+	}
+}

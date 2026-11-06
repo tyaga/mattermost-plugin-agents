@@ -92,7 +92,7 @@ func (p *MattermostToolProvider) toolGetTeamInfo(mcpContext *MCPToolContext, arg
 		if validationErr := requireID("team_id", args.TeamID); validationErr != nil {
 			return "", validationErr
 		}
-		team, _, err = client.GetTeam(ctx, args.TeamID, "")
+		team, err = p.team(ctx, client, mcpContext.UserID, args.TeamID)
 		if err != nil {
 			return "", fmt.Errorf("error fetching team by ID: %w", err)
 		}

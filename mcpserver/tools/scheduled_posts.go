@@ -178,7 +178,7 @@ func (p *MattermostToolProvider) toolUpdateScheduledPost(mcpContext *MCPToolCont
 // get-by-ID endpoint, so it derives the team from the channel and scans the
 // user's scheduled posts, requesting direct-channel posts too.
 func (p *MattermostToolProvider) findScheduledPost(mcpContext *MCPToolContext, channelID, scheduledPostID string) (*model.ScheduledPost, error) {
-	channel, _, err := mcpContext.Client.GetChannel(mcpContext.Ctx, channelID)
+	channel, err := p.channel(mcpContext.Ctx, mcpContext.Client, mcpContext.UserID, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching channel for scheduled post: %w", err)
 	}

@@ -123,7 +123,7 @@ func TestApplySearchModifiers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, teamID := provider.applySearchModifiers(t.Context(), client, "hello", tt.args)
+			got, teamID := provider.applySearchModifiers(t.Context(), client, "", "hello", tt.args)
 			assert.Equal(t, tt.want, got)
 			assert.Empty(t, teamID, "a channel name should not imply a team")
 		})
@@ -146,7 +146,7 @@ func TestApplySearchModifiersResolvesChannelID(t *testing.T) {
 	provider := newTestProvider(t, ts.URL)
 	client := newTestClient(ts.URL)
 
-	got, gotTeamID := provider.applySearchModifiers(t.Context(), client, "hello", CombinedSearchArgs{In: channelID})
+	got, gotTeamID := provider.applySearchModifiers(t.Context(), client, "", "hello", CombinedSearchArgs{In: channelID})
 	assert.Equal(t, "in:resolved-name hello", got)
 	assert.Equal(t, teamID, gotTeamID)
 }

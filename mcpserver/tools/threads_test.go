@@ -90,10 +90,7 @@ func TestToolGetThreads(t *testing.T) {
 			}},
 		})
 	})
-	mux.HandleFunc(fmt.Sprintf("/api/v4/users/%s", authorID), func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(&model.User{Id: authorID, Username: "starter"})
-	})
+	mux.HandleFunc("/api/v4/users/ids", usersByIDsHandler(t, []*model.User{{Id: authorID, Username: "starter"}}))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
