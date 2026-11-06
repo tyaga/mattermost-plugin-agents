@@ -4,8 +4,12 @@
 package tools
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/mattermost/mattermost-plugin-agents/v2/format"
 	"github.com/mattermost/mattermost/server/public/model"
@@ -20,7 +24,10 @@ type GetThreadsArgs struct {
 
 // GetMentionsArgs represents arguments for the get_mentions tool.
 type GetMentionsArgs struct {
-	TeamID string `json:"team_id,omitempty" jsonschema:"Optional team ID to limit the search scope,maxLength=26"`
+	TeamID         string `json:"team_id,omitempty" jsonschema:"Optional team ID to limit the search scope,maxLength=26"`
+	Since          string `json:"since,omitempty" jsonschema:"Only mentions posted at or after this time (ISO 8601 / RFC3339),format=date-time"`
+	Limit          int    `json:"limit,omitempty" jsonschema:"Maximum number of mentions to return, newest first (default: 20, max: 100),minimum=1,maximum=100"`
+	UnansweredOnly bool   `json:"unanswered_only,omitempty" jsonschema:"Keep only mentions you have not replied to in their thread"`
 }
 
 // GetUnreadCountsArgs represents arguments for the get_unread_counts tool.
@@ -63,7 +70,7 @@ type SetThreadFollowArgs struct {
 
 const (
 	getThreadsDescription           = "Get your collated threads inbox (followed and unread threads, CRT / collapsed reply threads) for a team. Parameters: team_id (required), unread_only (optional), limit. Returns each thread's root post, reply count, and unread counts."
-	getMentionsDescription          = "Get recent posts containing unread at-mentions of you (Recent Mentions). Parameters: team_id (optional). Returns posts that mention your username or notification keywords."
+	getMentionsDescription          = "Get posts that mention you (your @username or notification keywords), newest first, with channel name and whether you have replied in the post's thread since. Parameters: team_id (optional), since (optional ISO 8601), limit (1-100, default 20), unanswered_only (optional). Example: {\"since\": \"2024-01-01T00:00:00Z\", \"unanswered_only\": true}"
 	getUnreadCountsDescription      = "Get your unread message, mention, and thread counts across teams, or for one team. Parameters: team_id (optional)."
 	getChannelUnreadDescription     = "Get your unread message and mention counts for one channel. Parameters: channel_id (required)."
 	getPostsAroundUnreadDescription = "Get the posts surrounding your last-read line in a channel. Parameters: channel_id (required), limit. Returns posts before and after the unread marker."
@@ -154,13 +161,144 @@ func (p *MattermostToolProvider) toolGetMentions(mcpContext *MCPToolContext, arg
 		return "no mention keywords configured for your account", nil
 	}
 
-	// OR-search across all mention keywords.
-	postList, _, err := mcpContext.Client.SearchPosts(mcpContext.Ctx, args.TeamID, strings.Join(keywords, " "), true)
+	sinceMillis := int64(0)
+	if args.Since != "" {
+		if sinceMillis, err = parseTimeMillis(args.Since); err != nil {
+			return "", err
+		}
+	}
+	if args.Limit <= 0 {
+		args.Limit = 20
+	}
+	if args.Limit > 100 {
+		args.Limit = 100
+	}
+
+	// OR-search across all mention keywords. The after: modifier narrows
+	// the search to whole days; the exact cut-off is applied below.
+	terms := strings.Join(keywords, " ")
+	if sinceMillis > 0 {
+		terms += " after:" + time.UnixMilli(sinceMillis).UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	}
+	page, perPage, isOr := 0, mentionSearchPageSize, true
+	postList, _, err := mcpContext.Client.SearchPostsWithParams(mcpContext.Ctx, args.TeamID, &model.SearchParameter{
+		Terms: &terms, IsOrSearch: &isOr, Page: &page, PerPage: &perPage,
+	})
 	if err != nil {
 		return "", fmt.Errorf("error searching mentions: %w", err)
 	}
 
-	return p.formatPostListChrono(mcpContext, postList, "posts mentioning you"), nil
+	posts := make([]*model.Post, 0, len(postList.Posts))
+	for _, post := range postList.Posts {
+		if post.CreateAt >= sinceMillis && post.UserId != user.Id {
+			posts = append(posts, post)
+		}
+	}
+	slices.SortFunc(posts, func(a, b *model.Post) int {
+		return cmp.Or(cmp.Compare(b.CreateAt, a.CreateAt), cmp.Compare(b.Id, a.Id))
+	})
+
+	replied := p.repliedInThread(mcpContext, user.Id, posts)
+	if args.UnansweredOnly {
+		posts = slices.DeleteFunc(posts, func(post *model.Post) bool { return replied[post.Id] })
+	}
+	total := len(posts)
+	if total > args.Limit {
+		posts = posts[:args.Limit]
+	}
+	if total == 0 {
+		if args.UnansweredOnly {
+			return "no unanswered mentions found", nil
+		}
+		return "no mentions found", nil
+	}
+
+	return p.formatMentions(mcpContext, posts, replied, total), nil
+}
+
+// mentionSearchPageSize is how many search hits get_mentions inspects. The
+// search endpoint returns its default page (60) when no size is given.
+const mentionSearchPageSize = 200
+
+// repliedInThread reports, per post, whether userID posted in the post's
+// thread after it. Threads are read a few at a time; a thread that cannot be
+// read counts as not replied.
+func (p *MattermostToolProvider) repliedInThread(mcpContext *MCPToolContext, userID string, posts []*model.Post) map[string]bool {
+	roots := make([]string, 0, len(posts))
+	seen := make(map[string]bool, len(posts))
+	for _, post := range posts {
+		root := cmp.Or(post.RootId, post.Id)
+		if !seen[root] {
+			seen[root] = true
+			roots = append(roots, root)
+		}
+	}
+
+	// Latest time the user posted in each thread.
+	lastByUser := make([]int64, len(roots))
+	forEachParallel(len(roots), func(i int) {
+		thread, _, err := mcpContext.Client.GetPostThread(mcpContext.Ctx, roots[i], "", false)
+		if err != nil {
+			p.logger.Warn("failed to read thread for reply check", "root_id", roots[i], "error", err)
+			return
+		}
+		for _, post := range thread.Posts {
+			if post.UserId == userID && post.CreateAt > lastByUser[i] {
+				lastByUser[i] = post.CreateAt
+			}
+		}
+	})
+	lastReply := make(map[string]int64, len(roots))
+	for i, root := range roots {
+		lastReply[root] = lastByUser[i]
+	}
+
+	replied := make(map[string]bool, len(posts))
+	for _, post := range posts {
+		replied[post.Id] = lastReply[cmp.Or(post.RootId, post.Id)] > post.CreateAt
+	}
+	return replied
+}
+
+// formatMentions renders mentions newest first with author, channel, and the
+// caller's reply status.
+func (p *MattermostToolProvider) formatMentions(mcpContext *MCPToolContext, posts []*model.Post, replied map[string]bool, total int) string {
+	ctx, client := mcpContext.Ctx, mcpContext.Client
+
+	userIDs := make([]string, len(posts))
+	for i, post := range posts {
+		userIDs[i] = post.UserId
+	}
+	channelNames := make([]string, len(posts))
+	var usernames map[string]string
+	var wg sync.WaitGroup
+	wg.Go(func() { usernames = p.usernamesByIDs(ctx, client, userIDs) })
+	wg.Go(func() {
+		forEachParallel(len(posts), func(i int) {
+			if channel, err := p.channel(ctx, client, mcpContext.UserID, posts[i].ChannelId); err == nil {
+				channelNames[i] = channelDisplayNameOrFallback(channel)
+			}
+		})
+	})
+	wg.Wait()
+
+	var result strings.Builder
+	fmt.Fprintf(&result, "Found %d mention(s), showing %d, newest first:\n\n", total, len(posts))
+	for i, post := range posts {
+		status := "(no reply from you in thread)"
+		if replied[post.Id] {
+			status = "(you replied in thread)"
+		}
+		format.WritePost(&result, format.PostEntry{
+			HeaderLabel:     fmt.Sprintf("Mention %d", i+1),
+			Username:        usernames[post.UserId],
+			ReplyAnnotation: status,
+			Post:            post,
+			ChannelName:     channelNames[i],
+			ShowChannel:     true,
+		})
+	}
+	return result.String()
 }
 
 // mentionKeywords builds the set of terms that mention a user: their @username plus

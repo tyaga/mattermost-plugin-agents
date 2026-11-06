@@ -43,7 +43,7 @@ func (c *requestCounter) count(path string) int {
 	return c.counts[path]
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
+func writeTestJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
@@ -62,7 +62,7 @@ func usersByIDsHandler(t *testing.T, known []*model.User) http.HandlerFunc {
 				}
 			}
 		}
-		writeJSON(w, users)
+		writeTestJSON(w, users)
 	}
 }
 
@@ -100,17 +100,17 @@ func TestAuthorsResolvedInOneRequest(t *testing.T) {
 		http.NotFound(w, r)
 	})
 	mux.HandleFunc("/api/v4/channels/"+channelID, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, &model.Channel{Id: channelID, TeamId: teamID, DisplayName: "Town Square", Type: model.ChannelTypeOpen})
+		writeTestJSON(w, &model.Channel{Id: channelID, TeamId: teamID, DisplayName: "Town Square", Type: model.ChannelTypeOpen})
 	})
 	mux.HandleFunc("/api/v4/teams/"+teamID, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, &model.Team{Id: teamID, DisplayName: "Main"})
+		writeTestJSON(w, &model.Team{Id: teamID, DisplayName: "Main"})
 	})
 	mux.HandleFunc("/api/v4/channels/"+channelID+"/members", func(w http.ResponseWriter, _ *http.Request) {
 		members := make(model.ChannelMembers, 0, len(users))
 		for _, u := range users {
 			members = append(members, model.ChannelMember{ChannelId: channelID, UserId: u.Id, SchemeUser: true})
 		}
-		writeJSON(w, members)
+		writeTestJSON(w, members)
 	})
 	mux.HandleFunc("/api/v4/posts/"+rootID+"/thread", func(w http.ResponseWriter, _ *http.Request) {
 		list := model.NewPostList()
@@ -118,7 +118,7 @@ func TestAuthorsResolvedInOneRequest(t *testing.T) {
 			list.AddPost(post)
 			list.AddOrder(post.Id)
 		}
-		writeJSON(w, list)
+		writeTestJSON(w, list)
 	})
 	mux.HandleFunc("/api/v4/teams/"+teamID+"/posts/search", func(w http.ResponseWriter, _ *http.Request) {
 		list := model.NewPostList()
@@ -126,7 +126,7 @@ func TestAuthorsResolvedInOneRequest(t *testing.T) {
 			list.AddPost(post)
 			list.AddOrder(post.Id)
 		}
-		writeJSON(w, &model.PostSearchResults{PostList: list})
+		writeTestJSON(w, &model.PostSearchResults{PostList: list})
 	})
 	mux.HandleFunc("/api/v4/posts/search", func(w http.ResponseWriter, _ *http.Request) {
 		list := model.NewPostList()
@@ -134,7 +134,7 @@ func TestAuthorsResolvedInOneRequest(t *testing.T) {
 			list.AddPost(post)
 			list.AddOrder(post.Id)
 		}
-		writeJSON(w, &model.PostSearchResults{PostList: list})
+		writeTestJSON(w, &model.PostSearchResults{PostList: list})
 	})
 
 	tests := []struct {
@@ -207,10 +207,10 @@ func TestMetaCacheServesRepeatLookups(t *testing.T) {
 			counter := &requestCounter{}
 			mux := http.NewServeMux()
 			mux.HandleFunc("/api/v4/teams/"+teamID, func(w http.ResponseWriter, _ *http.Request) {
-				writeJSON(w, &model.Team{Id: teamID, DisplayName: "Main"})
+				writeTestJSON(w, &model.Team{Id: teamID, DisplayName: "Main"})
 			})
 			mux.HandleFunc("/api/v4/channels/"+channelID, func(w http.ResponseWriter, _ *http.Request) {
-				writeJSON(w, &model.Channel{Id: channelID, DisplayName: "Town Square"})
+				writeTestJSON(w, &model.Channel{Id: channelID, DisplayName: "Town Square"})
 			})
 			ts := httptest.NewServer(counter.wrap(mux))
 			defer ts.Close()
@@ -252,7 +252,7 @@ func TestMetaCacheDoesNotCacheFailures(t *testing.T) {
 			http.Error(w, "boom", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, &model.Team{Id: teamID, DisplayName: "Main"})
+		writeTestJSON(w, &model.Team{Id: teamID, DisplayName: "Main"})
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()

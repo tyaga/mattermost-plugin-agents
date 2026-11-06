@@ -496,10 +496,10 @@ func TestToolGetActiveChannelsLastPost(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(fmt.Sprintf("/api/v4/users/%s/channels", meID), func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, []*model.Channel{friendDM, answeredDM, botDM, unreadable})
+		writeTestJSON(w, []*model.Channel{friendDM, answeredDM, botDM, unreadable})
 	})
 	mux.HandleFunc(fmt.Sprintf("/api/v4/users/%s/teams", meID), func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, []*model.Team{})
+		writeTestJSON(w, []*model.Team{})
 	})
 	mux.HandleFunc("/api/v4/users/ids", usersByIDsHandler(t, []*model.User{
 		{Id: meID, Username: "me"},
@@ -519,7 +519,7 @@ func TestToolGetActiveChannelsLastPost(t *testing.T) {
 			list.AddPost(post)
 			list.AddOrder(post.Id)
 		}
-		writeJSON(w, list)
+		writeTestJSON(w, list)
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
