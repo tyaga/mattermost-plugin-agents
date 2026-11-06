@@ -298,6 +298,7 @@ func (p *MattermostToolProvider) formatMentions(mcpContext *MCPToolContext, post
 		}
 		format.WritePost(&result, format.PostEntry{
 			Compact:         p.compactOutput,
+			Permalink:       p.permalink(post.Id),
 			HeaderLabel:     fmt.Sprintf("Mention %d", i+1),
 			Username:        usernames[post.UserId],
 			ReplyAnnotation: status,

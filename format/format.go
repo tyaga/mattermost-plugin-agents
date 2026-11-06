@@ -141,6 +141,9 @@ type PostEntry struct {
 	// Compact renders the post as a one-line header followed by the message,
 	// about half the size of the labeled layout.
 	Compact bool
+
+	// Permalink, when set, is a URL that opens the post in the client.
+	Permalink string
 }
 
 // FormatPost writes a single formatted post entry to the builder.
@@ -176,6 +179,9 @@ func WritePost(w *strings.Builder, entry PostEntry) {
 
 	// Post ID
 	fmt.Fprintf(w, "Post ID: %s\n", entry.Post.Id)
+	if entry.Permalink != "" {
+		fmt.Fprintf(w, "Link: %s\n", entry.Permalink)
+	}
 
 	// Optional Channel ID
 	if entry.ShowChannel {
@@ -211,6 +217,9 @@ func writePostCompact(w *strings.Builder, entry PostEntry, username string) {
 		fmt.Fprintf(w, " %s", time.UnixMilli(entry.Post.CreateAt).UTC().Format(compactTimeLayout))
 	}
 	fmt.Fprintf(w, " @%s id=%s", username, entry.Post.Id)
+	if entry.Permalink != "" {
+		fmt.Fprintf(w, " link=%s", entry.Permalink)
+	}
 	if entry.Post.RootId != "" {
 		fmt.Fprintf(w, " root=%s", entry.Post.RootId)
 	}
@@ -838,6 +847,7 @@ type ChannelActivityEntry struct {
 	// start of its message.
 	LastPost       *model.Post
 	LastPostAuthor string
+	LastPostLink   string // URL opening the last post in the client; empty to omit
 }
 
 // lastPostSnippetRunes bounds the message preview in channel activity rows.
@@ -858,7 +868,11 @@ func WriteChannelActivity(w *strings.Builder, entry ChannelActivityEntry) {
 		if author == "" {
 			author = "Unknown User"
 		}
-		fmt.Fprintf(w, "   last: @%s: %s (post %s)\n", author, PostSnippet(entry.LastPost, lastPostSnippetRunes), entry.LastPost.Id)
+		fmt.Fprintf(w, "   last: @%s: %s (post %s", author, PostSnippet(entry.LastPost, lastPostSnippetRunes), entry.LastPost.Id)
+		if entry.LastPostLink != "" {
+			fmt.Fprintf(w, ", %s", entry.LastPostLink)
+		}
+		w.WriteString(")\n")
 	}
 }
 

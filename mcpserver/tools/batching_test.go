@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -543,4 +544,54 @@ func TestToolGroupFilter(t *testing.T) {
 	}
 	assert.Contains(t, ToolGroupNames(), "channels")
 	assert.Contains(t, ToolGroupNames(), "dev")
+}
+
+// Post listings carry a link that opens each post in the client, built from
+// the external site URL and the team-independent _redirect route.
+func TestPostListingsIncludePermalinks(t *testing.T) {
+	channelID := model.NewId()
+	author := &model.User{Id: model.NewId(), Username: "alice"}
+	post := &model.Post{Id: model.NewId(), ChannelId: channelID, UserId: author.Id, Message: "hello", CreateAt: 1000}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/channels/"+channelID, func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, &model.Channel{Id: channelID, DisplayName: "Ops", Type: model.ChannelTypeOpen})
+	})
+	mux.HandleFunc("/api/v4/channels/"+channelID+"/posts", func(w http.ResponseWriter, _ *http.Request) {
+		list := model.NewPostList()
+		list.AddPost(post)
+		list.AddOrder(post.Id)
+		writeTestJSON(w, list)
+	})
+	mux.HandleFunc("/api/v4/users/ids", usersByIDsHandler(t, []*model.User{author}))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	want := "https://chat.example.com/_redirect/pl/" + post.Id
+	tests := []struct {
+		name     string
+		siteURL  string
+		compact  bool
+		want     string
+		wantNone bool
+	}{
+		{name: "labeled layout", siteURL: "https://chat.example.com/", want: "Link: " + want},
+		{name: "compact layout", siteURL: "https://chat.example.com", compact: true, want: "link=" + want},
+		{name: "no site URL, no link", wantNone: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newTestProvider(t, ts.URL)
+			p.siteURL = strings.TrimRight(tt.siteURL, "/")
+			p.compactOutput = tt.compact
+			mcpCtx := &MCPToolContext{Ctx: t.Context(), Client: newTestClient(ts.URL), UserID: model.NewId()}
+			out, err := p.toolReadChannel(mcpCtx, ReadChannelArgs{ChannelID: channelID})
+			require.NoError(t, err)
+			if tt.wantNone {
+				assert.NotContains(t, out, "_redirect/pl/")
+				return
+			}
+			assert.Contains(t, out, tt.want)
+		})
+	}
 }

@@ -584,6 +584,7 @@ func (p *MattermostToolProvider) formatSingleResult(result *strings.Builder, ind
 	}
 	format.WritePost(result, format.PostEntry{
 		Compact:     p.compactOutput,
+		Permalink:   p.permalink(r.Post.Id),
 		HeaderLabel: fmt.Sprintf("Result %d", index),
 		Username:    username,
 		Score:       score,

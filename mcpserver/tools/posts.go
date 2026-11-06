@@ -243,6 +243,7 @@ func (p *MattermostToolProvider) toolReadPost(mcpContext *MCPToolContext, args R
 		}
 		format.WritePost(&result, format.PostEntry{
 			Compact:     p.compactOutput,
+			Permalink:   p.permalink(post.Id),
 			HeaderLabel: fmt.Sprintf("Post %d", i+1),
 			Username:    usernames[post.UserId],
 			Post:        post,
@@ -815,6 +816,7 @@ func (p *MattermostToolProvider) formatPostListChrono(mcpContext *MCPToolContext
 		}
 		format.WritePost(&result, format.PostEntry{
 			Compact:     p.compactOutput,
+			Permalink:   p.permalink(post.Id),
 			HeaderLabel: fmt.Sprintf("Post %d", i+1),
 			Username:    username,
 			Post:        post,

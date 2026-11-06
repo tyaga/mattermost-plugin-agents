@@ -118,6 +118,7 @@ type MattermostToolProvider struct {
 	authProvider            auth.AuthenticationProvider
 	logger                  logger.Logger
 	mmServerURL             string // Mattermost server URL for API communication (internal URL if set, otherwise external)
+	siteURL                 string // External Mattermost URL, used for links shown to users
 	devMode                 bool
 	accessMode              AccessMode
 	trackAIGenerated        bool                  // Whether to add ai_generated_by props to posts
@@ -146,6 +147,7 @@ func NewMattermostToolProvider(authProvider auth.AuthenticationProvider, logger 
 		authProvider:            authProvider,
 		logger:                  logger,
 		mmServerURL:             serverURL,
+		siteURL:                 strings.TrimRight(config.GetMMServerURL(), "/"),
 		devMode:                 config.GetDevMode(),
 		accessMode:              accessMode,
 		trackAIGenerated:        config.GetTrackAIGenerated(),
@@ -457,6 +459,17 @@ func (p *MattermostToolProvider) createMCPToolContext(ctx context.Context, metad
 	}
 
 	return mcpContext, nil
+}
+
+// permalink returns a link that opens the post in the Mattermost client. The
+// _redirect route resolves the post's team itself, so it works for team
+// channels, direct and group messages alike. Empty when the site URL is
+// unknown.
+func (p *MattermostToolProvider) permalink(postID string) string {
+	if p.siteURL == "" || postID == "" {
+		return ""
+	}
+	return p.siteURL + "/_redirect/pl/" + postID
 }
 
 // NewJSONSchemaForAccessMode creates a JSONSchema from a Go struct, filtering fields based on access mode

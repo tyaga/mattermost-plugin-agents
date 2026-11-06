@@ -349,6 +349,7 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 		}
 		format.WritePost(&result, format.PostEntry{
 			Compact:         p.compactOutput,
+			Permalink:       p.permalink(post.Id),
 			HeaderLabel:     fmt.Sprintf("Post %d", i+1),
 			Username:        userCache[post.UserId],
 			ReplyAnnotation: replyAnnotation,
@@ -1215,6 +1216,7 @@ func (p *MattermostToolProvider) toolGetActiveChannels(mcpContext *MCPToolContex
 		}
 		if post := lastPosts[channel.Id]; post != nil {
 			entry.LastPost = post
+			entry.LastPostLink = p.permalink(post.Id)
 			if author := lastAuthors[post.UserId]; author != nil {
 				entry.LastPostAuthor = author.Username
 			}
