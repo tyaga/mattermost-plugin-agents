@@ -745,7 +745,7 @@ func (p *MattermostToolProvider) tryFindChannelByDisplayName(mcpContext *MCPTool
 		}
 
 		for _, ch := range channels {
-			if strings.EqualFold(ch.DisplayName, displayName) {
+			if displayNamesMatch(displayName, ch.DisplayName) {
 				return []*model.Channel{ch}, nil
 			}
 		}
@@ -760,10 +760,23 @@ func (p *MattermostToolProvider) tryFindChannelByDisplayName(mcpContext *MCPTool
 		return nil, fmt.Errorf("error searching channels: %w", searchErr)
 	}
 
-	// Find ALL matches by display name (case-insensitive)
+	// Find ALL matches by display name, ignoring emoji, case and spacing. When
+	// none match exactly, fall back to display names containing the term, so
+	// a partial name finds the channel without a team_id.
+	exact := make([]bool, len(channels))
+	anyExact := false
+	for i, ch := range channels {
+		exact[i] = displayNamesMatch(displayName, ch.DisplayName)
+		anyExact = anyExact || exact[i]
+	}
+	term := normalizeDisplayName(displayName)
 	var matches []*model.Channel
-	for _, ch := range channels {
-		if strings.EqualFold(ch.DisplayName, displayName) {
+	for i, ch := range channels {
+		matched := exact[i]
+		if !anyExact && term != "" {
+			matched = strings.Contains(normalizeDisplayName(ch.DisplayName), term)
+		}
+		if matched {
 			// Convert ChannelWithTeamData to Channel
 			matches = append(matches, &model.Channel{
 				Id:               ch.Id,
@@ -858,10 +871,13 @@ func (p *MattermostToolProvider) tryFindChannelBySubstring(mcpContext *MCPToolCo
 		return nil, fmt.Errorf("error fetching team channels: %w", channelErr)
 	}
 
-	termLower := strings.ToLower(term)
+	normalizedTerm := normalizeDisplayName(term)
+	if normalizedTerm == "" {
+		return nil, nil
+	}
 	var matches []*model.Channel
 	for _, ch := range channels {
-		if strings.Contains(strings.ToLower(ch.DisplayName), termLower) {
+		if strings.Contains(normalizeDisplayName(ch.DisplayName), normalizedTerm) {
 			matches = append(matches, ch)
 		}
 	}

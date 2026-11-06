@@ -666,3 +666,63 @@ func TestToolReadChannels(t *testing.T) {
 		})
 	}
 }
+
+func TestGetChannelInfoIgnoresEmojiAndMatchesPartially(t *testing.T) {
+	meID := model.NewId()
+	teamID := model.NewId()
+	infra := &model.Channel{Id: model.NewId(), TeamId: teamID, Type: model.ChannelTypePrivate, Name: "platform-infrastructure", DisplayName: "🛠️ Platform Infrastructure"}
+	alerts := &model.Channel{Id: model.NewId(), TeamId: teamID, Type: model.ChannelTypePrivate, Name: "infra-alerts", DisplayName: "Infra Alerts"}
+	all := []*model.Channel{infra, alerts}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/channels/search", func(w http.ResponseWriter, _ *http.Request) {
+		// The server's search is fuzzy; return everything and let the tool match.
+		var list model.ChannelListWithTeamData
+		for _, ch := range all {
+			list = append(list, &model.ChannelWithTeamData{Channel: *ch, TeamDisplayName: "Main"})
+		}
+		writeTestJSON(w, list)
+	})
+	mux.HandleFunc(fmt.Sprintf("/api/v4/users/%s/teams/%s/channels", meID, teamID), func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, all)
+	})
+	mux.HandleFunc("/api/v4/teams/"+teamID, func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, &model.Team{Id: teamID, DisplayName: "Main"})
+	})
+	mux.HandleFunc("/api/v4/channels/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/stats") {
+			writeTestJSON(w, &model.ChannelStats{MemberCount: 3})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	provider := newTestProvider(t, ts.URL)
+	mcpCtx := &MCPToolContext{Client: newTestClient(ts.URL), Ctx: t.Context(), UserID: meID}
+
+	tests := []struct {
+		name    string
+		args    GetChannelInfoArgs
+		want    []string
+		notWant []string
+	}{
+		{"exact name without the emoji, across teams", GetChannelInfoArgs{ChannelName: "platform infrastructure"}, []string{"Platform Infrastructure", infra.Id}, []string{"Infra Alerts"}},
+		{"exact name without the emoji, within a team", GetChannelInfoArgs{ChannelName: "Platform Infrastructure", TeamID: teamID}, []string{infra.Id}, []string{"Infra Alerts"}},
+		{"partial name across teams", GetChannelInfoArgs{ChannelName: "infrastructure"}, []string{infra.Id}, []string{alerts.Id}},
+		{"partial name matching several channels lists all", GetChannelInfoArgs{ChannelName: "infra"}, []string{"Found 2 channels", infra.Id, alerts.Id}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := provider.toolGetChannelInfo(mcpCtx, tt.args)
+			require.NoError(t, err)
+			for _, want := range tt.want {
+				assert.Contains(t, out, want)
+			}
+			for _, notWant := range tt.notWant {
+				assert.NotContains(t, out, notWant)
+			}
+		})
+	}
+}
