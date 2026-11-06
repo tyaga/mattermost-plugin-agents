@@ -779,10 +779,19 @@ type ChannelActivityEntry struct {
 	Channel  *model.Channel // the source channel
 	Label    string         // resolved display label, e.g. "DM with @username" or the channel display name
 	TeamName string         // resolved team display name; empty to omit
+
+	// LastPost, when set, is shown as a second line with its author and the
+	// start of its message.
+	LastPost       *model.Post
+	LastPostAuthor string
 }
 
+// lastPostSnippetRunes bounds the message preview in channel activity rows.
+const lastPostSnippetRunes = 160
+
 // WriteChannelActivity writes a compact single-line channel row: last post time,
-// type, label, optional team, and channel ID.
+// type, label, optional team, and channel ID, plus a preview line of the last
+// post when one is given.
 func WriteChannelActivity(w *strings.Builder, entry ChannelActivityEntry) {
 	t := time.UnixMilli(entry.Channel.LastPostAt)
 	fmt.Fprintf(w, "%d. %s | %s | %s", entry.Index, t.UTC().Format(time.RFC3339), entry.Channel.Type, entry.Label)
@@ -790,6 +799,31 @@ func WriteChannelActivity(w *strings.Builder, entry ChannelActivityEntry) {
 		fmt.Fprintf(w, " | Team: %s", entry.TeamName)
 	}
 	fmt.Fprintf(w, " | ID: %s\n", entry.Channel.Id)
+	if entry.LastPost != nil {
+		author := entry.LastPostAuthor
+		if author == "" {
+			author = "Unknown User"
+		}
+		fmt.Fprintf(w, "   last: @%s: %s (post %s)\n", author, PostSnippet(entry.LastPost, lastPostSnippetRunes), entry.LastPost.Id)
+	}
+}
+
+// PostSnippet returns a post's message collapsed to one line and cut to at
+// most maxRunes runes. Posts without text but with files are shown as a file
+// count so they do not read as empty.
+func PostSnippet(post *model.Post, maxRunes int) string {
+	text := strings.Join(strings.Fields(post.Message), " ")
+	if text == "" {
+		if n := len(post.FileIds); n > 0 {
+			return fmt.Sprintf("[%d file(s)]", n)
+		}
+		return "[no text]"
+	}
+	runes := []rune(text)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "…"
+	}
+	return text
 }
 
 // TeamEntry holds data for formatting a single team.

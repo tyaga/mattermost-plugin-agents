@@ -72,10 +72,12 @@ type GetUserChannelsArgs struct {
 
 // GetActiveChannelsArgs represents arguments for the get_active_channels tool
 type GetActiveChannelsArgs struct {
-	Since        string   `json:"since" jsonschema:"Only return channels whose last post is at or after this time (ISO 8601 / RFC3339 timestamp),format=date-time"`
-	TeamID       string   `json:"team_id,omitempty" jsonschema:"Optional team ID to filter by team; DMs and GMs have no team and are excluded by this filter,maxLength=26"`
-	ChannelTypes []string `json:"channel_types,omitempty" jsonschema:"Optional channel type filter: 'O' public, 'P' private, 'D' direct message, 'G' group message (default: all types)"`
-	Limit        int      `json:"limit,omitempty" jsonschema:"Maximum number of channels to return (default: 60, max: 200),minimum=1,maximum=200"`
+	Since         string   `json:"since" jsonschema:"Only return channels whose last post is at or after this time (ISO 8601 / RFC3339 timestamp),format=date-time"`
+	TeamID        string   `json:"team_id,omitempty" jsonschema:"Optional team ID to filter by team; DMs and GMs have no team and are excluded by this filter,maxLength=26"`
+	ChannelTypes  []string `json:"channel_types,omitempty" jsonschema:"Optional channel type filter: 'O' public, 'P' private, 'D' direct message, 'G' group message (default: all types)"`
+	Limit         int      `json:"limit,omitempty" jsonschema:"Maximum number of channels to return (default: 60, max: 200),minimum=1,maximum=200"`
+	WithLastPost  bool     `json:"with_last_post,omitempty" jsonschema:"Also show each channel's last post: author and the start of the message"`
+	AwaitingReply bool     `json:"awaiting_reply,omitempty" jsonschema:"Keep only channels whose last post was written by someone else (not you and not a bot); implies with_last_post. Use with channel_types D and G to find conversations waiting for your reply"`
 }
 
 // Tool description constants for channel-related tools.
@@ -90,7 +92,7 @@ const (
 
 	getUserChannelsDescription = "Get channels the current user is a member of, including DMs and GMs. Parameters: team_id (optional, filter by team), page (default 0), per_page (1-200, default 60). Returns channel details with team info and pagination. Example: {\"team_id\": \"w1jkn9ebkiby7qezqfxk7o5ney\", \"per_page\": 60}"
 
-	getActiveChannelsDescription = "Get channels with recent activity: channels the current user is a member of (including DMs and GMs) whose last post is at or after the given time, sorted newest first. DM rows show the other participant's username. Use this to answer questions like 'who wrote to me today' or 'what happened while I was away' — first call this, then read_channel only the channels it returns, instead of reading every channel. Parameters: since (required, ISO 8601), team_id (optional), channel_types (optional list of 'O' public, 'P' private, 'D' direct, 'G' group), limit (1-200, default 60). Example: {\"since\": \"2024-01-01T00:00:00Z\", \"channel_types\": [\"D\", \"G\"]}"
+	getActiveChannelsDescription = "Get channels with recent activity: channels the current user is a member of (including DMs and GMs) whose last post is at or after the given time, sorted newest first. DM rows show the other participant's username. Use this to answer questions like 'who wrote to me today' or 'what happened while I was away' — first call this, then read_channel only the channels it returns, instead of reading every channel. With with_last_post each row also shows who wrote last and what; with awaiting_reply only channels where the last post is from someone else (not you, not a bot) are kept — one call answers 'which conversations am I yet to reply to'. Parameters: since (required, ISO 8601), team_id (optional), channel_types (optional list of 'O' public, 'P' private, 'D' direct, 'G' group), limit (1-200, default 60), with_last_post, awaiting_reply. Example: {\"since\": \"2024-01-01T00:00:00Z\", \"channel_types\": [\"D\", \"G\"], \"awaiting_reply\": true}"
 )
 
 // getChannelTools returns all channel-related tools
@@ -981,6 +983,40 @@ func (p *MattermostToolProvider) toolGetUserChannels(mcpContext *MCPToolContext,
 	return result.String(), nil
 }
 
+// lastPostScanSize is how many recent posts are read per channel to find the
+// last one a person wrote; join/leave and other system messages are skipped.
+const lastPostScanSize = 5
+
+// lastPostsWithAuthors fetches the newest non-system post of every channel, a
+// few channels at a time, and resolves their authors in one request. Channels
+// whose posts cannot be read are absent from the result.
+func (p *MattermostToolProvider) lastPostsWithAuthors(ctx context.Context, client *model.Client4, channels []*model.Channel) (map[string]*model.Post, map[string]*model.User) {
+	found := make([]*model.Post, len(channels))
+	forEachParallel(len(channels), func(i int) {
+		list, _, err := client.GetPostsForChannel(ctx, channels[i].Id, 0, lastPostScanSize, "", false, false)
+		if err != nil {
+			p.logger.Warn("failed to fetch last post", "channel_id", channels[i].Id, "error", err)
+			return
+		}
+		for _, id := range list.Order {
+			if post := list.Posts[id]; post != nil && !post.IsSystemMessage() {
+				found[i] = post
+				return
+			}
+		}
+	})
+
+	posts := make(map[string]*model.Post, len(channels))
+	authorIDs := make([]string, 0, len(channels))
+	for i, post := range found {
+		if post != nil {
+			posts[channels[i].Id] = post
+			authorIDs = append(authorIDs, post.UserId)
+		}
+	}
+	return posts, p.usersByIDs(ctx, client, authorIDs)
+}
+
 // toolGetActiveChannels implements the get_active_channels tool.
 func (p *MattermostToolProvider) toolGetActiveChannels(mcpContext *MCPToolContext, args GetActiveChannelsArgs) (string, error) {
 	if strings.TrimSpace(args.Since) == "" {
@@ -1040,8 +1076,28 @@ func (p *MattermostToolProvider) toolGetActiveChannels(mcpContext *MCPToolContex
 
 	slices.SortFunc(channels, func(a, b *model.Channel) int { return cmp.Compare(b.LastPostAt, a.LastPostAt) })
 
+	withLastPost := args.WithLastPost || args.AwaitingReply
+	var lastPosts map[string]*model.Post
+	var lastAuthors map[string]*model.User
+	if withLastPost && len(channels) > 0 {
+		lastPosts, lastAuthors = p.lastPostsWithAuthors(ctx, client, channels)
+	}
+	if args.AwaitingReply {
+		channels = slices.DeleteFunc(channels, func(channel *model.Channel) bool {
+			post := lastPosts[channel.Id]
+			if post == nil || post.UserId == userID {
+				return true
+			}
+			author := lastAuthors[post.UserId]
+			return author != nil && author.IsBot
+		})
+	}
+
 	totalCount := len(channels)
 	if totalCount == 0 {
+		if args.AwaitingReply {
+			return fmt.Sprintf("No channels with posts since %s are waiting for your reply.", args.Since), nil
+		}
 		return fmt.Sprintf("No channels with posts since %s.", args.Since), nil
 	}
 	truncated := totalCount > args.Limit
@@ -1084,12 +1140,19 @@ func (p *MattermostToolProvider) toolGetActiveChannels(mcpContext *MCPToolContex
 			}
 		}
 
-		format.WriteChannelActivity(&result, format.ChannelActivityEntry{
+		entry := format.ChannelActivityEntry{
 			Index:    i + 1,
 			Channel:  channel,
 			Label:    label,
 			TeamName: teamNames[channel.TeamId],
-		})
+		}
+		if post := lastPosts[channel.Id]; post != nil {
+			entry.LastPost = post
+			if author := lastAuthors[post.UserId]; author != nil {
+				entry.LastPostAuthor = author.Username
+			}
+		}
+		format.WriteChannelActivity(&result, entry)
 	}
 
 	if truncated {

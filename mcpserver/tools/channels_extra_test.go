@@ -466,3 +466,103 @@ func TestToolReadChannelServerCapHonesty(t *testing.T) {
 		assert.Contains(t, out, "narrow the timeframe")
 	})
 }
+
+func TestToolGetActiveChannelsLastPost(t *testing.T) {
+	meID := model.NewId()
+	friendID := model.NewId()
+	botID := model.NewId()
+
+	dmWith := func(other string) string {
+		if other < meID {
+			return other + "__" + meID
+		}
+		return meID + "__" + other
+	}
+	friendDM := &model.Channel{Id: model.NewId(), Type: model.ChannelTypeDirect, Name: dmWith(friendID), LastPostAt: 5000}
+	answeredDM := &model.Channel{Id: model.NewId(), Type: model.ChannelTypeDirect, Name: dmWith(model.NewId()), LastPostAt: 4000}
+	botDM := &model.Channel{Id: model.NewId(), Type: model.ChannelTypeDirect, Name: dmWith(botID), LastPostAt: 3000}
+	unreadable := &model.Channel{Id: model.NewId(), Type: model.ChannelTypeGroup, DisplayName: "broken", LastPostAt: 2000}
+
+	// Newest first, as the API orders them; the friend's DM ends with a
+	// system message that must be skipped.
+	lastPosts := map[string][]*model.Post{
+		friendDM.Id: {
+			{Id: model.NewId(), UserId: friendID, Type: model.PostTypeJoinChannel, Message: "joined"},
+			{Id: model.NewId(), UserId: friendID, Message: "can you   look\nat this?"},
+		},
+		answeredDM.Id: {{Id: model.NewId(), UserId: meID, Message: "done"}},
+		botDM.Id:      {{Id: model.NewId(), UserId: botID, Message: "build failed"}},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(fmt.Sprintf("/api/v4/users/%s/channels", meID), func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, []*model.Channel{friendDM, answeredDM, botDM, unreadable})
+	})
+	mux.HandleFunc(fmt.Sprintf("/api/v4/users/%s/teams", meID), func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, []*model.Team{})
+	})
+	mux.HandleFunc("/api/v4/users/ids", usersByIDsHandler(t, []*model.User{
+		{Id: meID, Username: "me"},
+		{Id: friendID, Username: "friend"},
+		{Id: botID, Username: "ci", IsBot: true},
+	}))
+	mux.HandleFunc("/api/v4/channels/", func(w http.ResponseWriter, r *http.Request) {
+		channelID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v4/channels/"), "/posts")
+		posts, ok := lastPosts[channelID]
+		if !ok {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		list := model.NewPostList()
+		for _, post := range posts {
+			post.ChannelId = channelID
+			list.AddPost(post)
+			list.AddOrder(post.Id)
+		}
+		writeJSON(w, list)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	provider := newTestProvider(t, ts.URL)
+	mcpCtx := &MCPToolContext{Client: newTestClient(ts.URL), Ctx: t.Context(), UserID: meID}
+	since := "1970-01-01T00:00:01Z"
+
+	tests := []struct {
+		name    string
+		args    GetActiveChannelsArgs
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "with_last_post shows author and one-line preview, skipping system messages",
+			args:    GetActiveChannelsArgs{Since: since, WithLastPost: true},
+			want:    []string{"showing 4 of 4", "last: @friend: can you look at this?", "last: @me: done", "last: @ci: build failed"},
+			notWant: []string{"joined"},
+		},
+		{
+			name:    "awaiting_reply keeps only conversations last written by another person",
+			args:    GetActiveChannelsArgs{Since: since, AwaitingReply: true},
+			want:    []string{"showing 1 of 1", "DM with @friend", "last: @friend"},
+			notWant: []string{"done", "build failed", "broken"},
+		},
+		{
+			name:    "without the flags no posts are fetched",
+			args:    GetActiveChannelsArgs{Since: since},
+			want:    []string{"showing 4 of 4"},
+			notWant: []string{"last:"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := provider.toolGetActiveChannels(mcpCtx, tt.args)
+			require.NoError(t, err)
+			for _, want := range tt.want {
+				assert.Contains(t, out, want)
+			}
+			for _, notWant := range tt.notWant {
+				assert.NotContains(t, out, notWant)
+			}
+		})
+	}
+}
