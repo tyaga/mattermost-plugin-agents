@@ -144,9 +144,9 @@ func (p *MattermostToolProvider) toolGetMentions(mcpContext *MCPToolContext, arg
 		return "", err
 	}
 
-	user, _, err := mcpContext.Client.GetMe(mcpContext.Ctx, "")
+	user, err := p.resolveUser(mcpContext)
 	if err != nil {
-		return "", fmt.Errorf("error getting current user: %w", err)
+		return "", err
 	}
 
 	keywords := mentionKeywords(user)

@@ -270,6 +270,8 @@ func (p *MattermostToolProvider) stampAIGeneratedDraft(draft *model.Draft, mcpCo
 	switch {
 	case mcpContext.BotUserID != "" && model.IsValidId(mcpContext.BotUserID):
 		userID = mcpContext.BotUserID
+	case mcpContext.UserID != "":
+		userID = mcpContext.UserID
 	case mcpContext.Client != nil:
 		if user, _, err := mcpContext.Client.GetMe(mcpContext.Ctx, ""); err == nil && user != nil {
 			userID = user.Id

@@ -142,12 +142,12 @@ func (p *MattermostToolProvider) resolveTeamByName(mcpContext *MCPToolContext, n
 	client := mcpContext.Client
 	ctx := mcpContext.Ctx
 
-	user, _, userErr := client.GetMe(ctx, "")
-	if userErr != nil {
-		return nil, "", fmt.Errorf("error getting current user: %w", userErr)
+	userID, err := p.resolveUserID(mcpContext)
+	if err != nil {
+		return nil, "", err
 	}
 
-	teams, _, teamsErr := client.GetTeamsForUser(ctx, user.Id, "")
+	teams, _, teamsErr := client.GetTeamsForUser(ctx, userID, "")
 	if teamsErr != nil {
 		return nil, "", fmt.Errorf("error fetching user teams: %w", teamsErr)
 	}
@@ -563,15 +563,20 @@ func (p *MattermostToolProvider) toolGetDMCommonTeams(mcpContext *MCPToolContext
 		return "no members found in this channel", nil
 	}
 
-	// Intersect each member's teams.
+	// Fetch every member's teams a few at a time, then intersect.
+	memberTeams := make([][]*model.Team, len(members))
+	memberErrs := make([]error, len(members))
+	forEachParallel(len(members), func(i int) {
+		memberTeams[i], _, memberErrs[i] = client.GetTeamsForUser(ctx, members[i].UserId, "")
+	})
+
 	var common map[string]*model.Team
-	for _, member := range members {
-		teams, _, teamsErr := client.GetTeamsForUser(ctx, member.UserId, "")
-		if teamsErr != nil {
-			return "", fmt.Errorf("error fetching teams for user %s: %w", member.UserId, teamsErr)
+	for i, member := range members {
+		if memberErrs[i] != nil {
+			return "", fmt.Errorf("error fetching teams for user %s: %w", member.UserId, memberErrs[i])
 		}
-		teamSet := make(map[string]*model.Team, len(teams))
-		for _, team := range teams {
+		teamSet := make(map[string]*model.Team, len(memberTeams[i]))
+		for _, team := range memberTeams[i] {
 			teamSet[team.Id] = team
 		}
 		if common == nil {

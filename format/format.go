@@ -773,6 +773,25 @@ func WriteChannel(w *strings.Builder, entry ChannelEntry) {
 	w.WriteString("\n")
 }
 
+// ChannelActivityEntry holds data for one row of an activity-sorted channel listing.
+type ChannelActivityEntry struct {
+	Index    int            // 1-based position in the listing
+	Channel  *model.Channel // the source channel
+	Label    string         // resolved display label, e.g. "DM with @username" or the channel display name
+	TeamName string         // resolved team display name; empty to omit
+}
+
+// WriteChannelActivity writes a compact single-line channel row: last post time,
+// type, label, optional team, and channel ID.
+func WriteChannelActivity(w *strings.Builder, entry ChannelActivityEntry) {
+	t := time.UnixMilli(entry.Channel.LastPostAt)
+	fmt.Fprintf(w, "%d. %s | %s | %s", entry.Index, t.UTC().Format(time.RFC3339), entry.Channel.Type, entry.Label)
+	if entry.TeamName != "" {
+		fmt.Fprintf(w, " | Team: %s", entry.TeamName)
+	}
+	fmt.Fprintf(w, " | ID: %s\n", entry.Channel.Id)
+}
+
 // TeamEntry holds data for formatting a single team.
 type TeamEntry struct {
 	Team        *model.Team // the source team

@@ -6,10 +6,15 @@ package tools
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 )
+
+// apiParallelism bounds how many Mattermost API requests one tool call has
+// in flight at once when it fans out per-item lookups.
+const apiParallelism = 8
 
 // resolveUserID returns the authenticated user's ID. It prefers the ID already
 // resolved on the context (set by external servers) and falls back to GetMe so
@@ -18,11 +23,24 @@ func (p *MattermostToolProvider) resolveUserID(mcpContext *MCPToolContext) (stri
 	if mcpContext.UserID != "" {
 		return mcpContext.UserID, nil
 	}
-	user, _, err := mcpContext.Client.GetMe(mcpContext.Ctx, "")
+	user, err := p.resolveUser(mcpContext)
 	if err != nil {
-		return "", fmt.Errorf("error getting current user: %w", err)
+		return "", err
 	}
 	return user.Id, nil
+}
+
+// resolveUser returns the authenticated user, from the context when the auth
+// provider resolved it and from GetMe otherwise.
+func (p *MattermostToolProvider) resolveUser(mcpContext *MCPToolContext) (*model.User, error) {
+	if mcpContext.User != nil {
+		return mcpContext.User, nil
+	}
+	user, _, err := mcpContext.Client.GetMe(mcpContext.Ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("error getting current user: %w", err)
+	}
+	return user, nil
 }
 
 // resolveUserIDOrDefault returns userID when set, otherwise the authenticated
@@ -55,4 +73,66 @@ func (p *MattermostToolProvider) usernameFor(ctx context.Context, client *model.
 		return "Unknown User"
 	}
 	return user.Username
+}
+
+// usersByIDs fetches the given users in one request and returns them keyed by
+// ID. Duplicates and empty IDs are ignored; users the lookup did not return
+// are absent from the map. A failed request yields an empty map and a warning
+// so callers degrade to "Unknown User" instead of failing the tool.
+func (p *MattermostToolProvider) usersByIDs(ctx context.Context, client *model.Client4, userIDs []string) map[string]*model.User {
+	unique := make([]string, 0, len(userIDs))
+	seen := make(map[string]bool, len(userIDs))
+	for _, id := range userIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		unique = append(unique, id)
+	}
+
+	byID := make(map[string]*model.User, len(unique))
+	if len(unique) == 0 {
+		return byID
+	}
+
+	users, _, err := client.GetUsersByIds(ctx, unique)
+	if err != nil {
+		p.logger.Warn("failed to fetch users by IDs", "count", len(unique), "error", err)
+		return byID
+	}
+	for _, user := range users {
+		byID[user.Id] = user
+	}
+	return byID
+}
+
+// usernamesByIDs is usersByIDs reduced to usernames, with "Unknown User" for
+// every requested ID the lookup did not return.
+func (p *MattermostToolProvider) usernamesByIDs(ctx context.Context, client *model.Client4, userIDs []string) map[string]string {
+	users := p.usersByIDs(ctx, client, userIDs)
+	names := make(map[string]string, len(userIDs))
+	for _, id := range userIDs {
+		if user, ok := users[id]; ok {
+			names[id] = user.Username
+		} else {
+			names[id] = "Unknown User"
+		}
+	}
+	return names
+}
+
+// forEachParallel calls fn for every index in [0, n) from at most apiParallelism
+// goroutines at a time and returns once all calls finished. fn must only write
+// to its own slot of any shared slice.
+func forEachParallel(n int, fn func(i int)) {
+	slots := make(chan struct{}, apiParallelism)
+	var wg sync.WaitGroup
+	for i := range n {
+		slots <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			fn(i)
+		})
+	}
+	wg.Wait()
 }

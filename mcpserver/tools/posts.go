@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/mattermost/mattermost-plugin-agents/v2/format"
 	"github.com/mattermost/mattermost/server/public/model"
@@ -138,14 +139,9 @@ func (p *MattermostToolProvider) toolReadPost(mcpContext *MCPToolContext, args R
 			posts = append(posts, post)
 		}
 
-		// Sort posts by CreateAt
-		for i := 0; i < len(posts)-1; i++ {
-			for j := i + 1; j < len(posts); j++ {
-				if posts[i].CreateAt > posts[j].CreateAt {
-					posts[i], posts[j] = posts[j], posts[i]
-				}
-			}
-		}
+		slices.SortFunc(posts, func(a, b *model.Post) int {
+			return cmp.Compare(a.CreateAt, b.CreateAt)
+		})
 	} else {
 		// Get just the single post
 		post, _, err := client.GetPost(ctx, args.PostID, "")
@@ -159,21 +155,27 @@ func (p *MattermostToolProvider) toolReadPost(mcpContext *MCPToolContext, args R
 		return "no posts found", nil
 	}
 
-	// Get channel and team info for context (using the first post's channel)
+	// Channel and team context (from the first post's channel) and the authors
+	// are independent lookups; run them side by side.
 	var channelName, teamName string
-	if len(posts) > 0 {
-		channel, _, err := client.GetChannel(ctx, posts[0].ChannelId)
-		if err == nil {
-			channelName = channel.DisplayName
-			// DM and group message channels have no team.
-			if channel.TeamId != "" {
-				team, _, teamErr := client.GetTeam(ctx, channel.TeamId, "")
-				if teamErr == nil {
-					teamName = team.DisplayName
-				}
-			}
-		}
+	userIDs := make([]string, len(posts))
+	for i, post := range posts {
+		userIDs[i] = post.UserId
 	}
+	var usernames map[string]string
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		channel, err := p.channel(ctx, client, mcpContext.UserID, posts[0].ChannelId)
+		if err != nil {
+			return
+		}
+		channelName = channel.DisplayName
+		teamName = p.teamDisplayName(ctx, client, mcpContext.UserID, channel.TeamId)
+	})
+	wg.Go(func() {
+		usernames = p.usernamesByIDs(ctx, client, userIDs)
+	})
+	wg.Wait()
 
 	// Format the response
 	var result strings.Builder
@@ -205,16 +207,9 @@ func (p *MattermostToolProvider) toolReadPost(mcpContext *MCPToolContext, args R
 	}
 
 	for i, post := range posts {
-		user, _, err := client.GetUser(ctx, post.UserId, "")
-		username := ""
-		if err != nil {
-			p.logger.Warn("failed to get user for post", "user_id", post.UserId, "error", err)
-		} else {
-			username = user.Username
-		}
 		format.WritePost(&result, format.PostEntry{
 			HeaderLabel: fmt.Sprintf("Post %d", i+1),
-			Username:    username,
+			Username:    usernames[post.UserId],
 			Post:        post,
 		})
 	}
@@ -372,10 +367,9 @@ func (p *MattermostToolProvider) toolDM(mcpContext *MCPToolContext, args DMArgs)
 	client := mcpContext.Client
 	ctx := mcpContext.Ctx
 
-	// Get current user information
-	currentUser, _, err := client.GetMe(ctx, "")
+	currentUser, err := p.resolveUser(mcpContext)
 	if err != nil {
-		return "", fmt.Errorf("error getting current user: %w", err)
+		return "", err
 	}
 
 	// Resolve target user
@@ -433,9 +427,9 @@ func (p *MattermostToolProvider) toolGroupMessage(mcpContext *MCPToolContext, ar
 	client := mcpContext.Client
 	ctx := mcpContext.Ctx
 
-	currentUser, _, err := client.GetMe(ctx, "")
+	currentUser, err := p.resolveUser(mcpContext)
 	if err != nil {
-		return "", fmt.Errorf("error getting current user: %w", err)
+		return "", err
 	}
 
 	// Resolve all targets into a deduplicated map of userID -> username
@@ -810,6 +804,8 @@ func (p *MattermostToolProvider) stampAIGenerated(post *model.Post, mcpContext *
 		userID = mcpContext.BotUserID
 	case fallbackUserID != "":
 		userID = fallbackUserID
+	case mcpContext.UserID != "":
+		userID = mcpContext.UserID
 	case mcpContext.Client != nil:
 		if user, _, err := mcpContext.Client.GetMe(mcpContext.Ctx, ""); err == nil && user != nil {
 			userID = user.Id

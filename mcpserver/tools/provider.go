@@ -31,6 +31,11 @@ type MCPToolContext struct {
 	// UserID is the Mattermost user ID of the user the Client is authenticated as.
 	// Empty when the auth provider cannot resolve an authenticated user.
 	UserID string
+
+	// User is the authenticated user when the auth provider resolved it while
+	// validating the request; nil otherwise. Tools that need the caller's
+	// profile go through resolveUser, which falls back to GetMe.
+	User *model.User
 }
 
 // MCPToolResolver defines the signature for MCP tool resolvers
@@ -113,6 +118,8 @@ type MattermostToolProvider struct {
 	searchService           SemanticSearchService // Optional semantic search service, can be nil
 	fileContentService      FileContentService    // Optional file content service for read_file, can be nil
 	allowStateChangingTools func() bool           // Evaluated per request; nil fails closed
+
+	cache metaCache // Team and channel lookups shared by tool calls
 }
 
 // NewMattermostToolProvider creates a new tool provider.
@@ -355,39 +362,33 @@ func (p *MattermostToolProvider) registerDynamicTool(server *mcp.Server, mcpTool
 	server.AddTool(tool, handler)
 }
 
-// authenticatedClientAndUserID returns the authenticated client and, when the
-// provider can tell, the user's ID. Providers that validate both at once are
+// authenticatedClientAndUser returns the authenticated client and, when the
+// provider can tell, the user. Providers that validate both at once are
 // asked once so a tool call costs a single session validation.
-func (p *MattermostToolProvider) authenticatedClientAndUserID(ctx context.Context) (*model.Client4, string, error) {
+func (p *MattermostToolProvider) authenticatedClientAndUser(ctx context.Context) (*model.Client4, *model.User, error) {
 	if both, ok := p.authProvider.(auth.ClientAndUserProvider); ok {
-		client, user, err := both.GetAuthenticatedClientAndUser(ctx)
-		if err != nil {
-			return nil, "", err
-		}
-		if user == nil {
-			return client, "", nil
-		}
-		return client, user.Id, nil
+		return both.GetAuthenticatedClientAndUser(ctx)
 	}
 
 	client, err := p.authProvider.GetAuthenticatedMattermostClient(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
-	var userID string
+	var user *model.User
 	if identityProvider, ok := p.authProvider.(auth.UserIdentityProvider); ok {
-		if user, userErr := identityProvider.GetAuthenticatedUser(ctx); userErr == nil && user != nil {
-			userID = user.Id
-		} else if userErr != nil {
+		var userErr error
+		user, userErr = identityProvider.GetAuthenticatedUser(ctx)
+		if userErr != nil {
 			p.logger.Debug("failed to resolve authenticated user for tool-call context", "error", userErr.Error())
+			user = nil
 		}
 	}
-	return client, userID, nil
+	return client, user, nil
 }
 
 // createMCPToolContext creates an MCPToolContext from the Go context, authenticated client, and request metadata
 func (p *MattermostToolProvider) createMCPToolContext(ctx context.Context, metadata mcp.Meta) (*MCPToolContext, error) {
-	client, userID, err := p.authenticatedClientAndUserID(ctx)
+	client, user, err := p.authenticatedClientAndUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +397,10 @@ func (p *MattermostToolProvider) createMCPToolContext(ctx context.Context, metad
 		Ctx:        ctx,
 		Client:     client,
 		AccessMode: p.accessMode,
-		UserID:     userID,
+		User:       user,
+	}
+	if user != nil {
+		mcpContext.UserID = user.Id
 	}
 
 	// Extract bot_user_id from metadata if present (for embedded servers)

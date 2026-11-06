@@ -44,18 +44,24 @@ func channelRenderMembers(members model.ChannelMembers) []renderMember {
 	return rendered
 }
 
-// renderMembers resolves each member's user details and formats them as a paged
-// listing. noun labels the listing (e.g. "Channel Members"). Bot accounts are
-// dropped when excludeBots is set, and the count is reported in the footer.
+// renderMembers resolves every member's user details in one request and
+// formats them as a paged listing. noun labels the listing (e.g. "Channel
+// Members"). Bot accounts are dropped when excludeBots is set, and the count
+// is reported in the footer.
 func (p *MattermostToolProvider) renderMembers(ctx context.Context, client *model.Client4, noun string, page int, members []renderMember, excludeBots bool) string {
+	userIDs := make([]string, len(members))
+	for i, m := range members {
+		userIDs[i] = m.userID
+	}
+	users := p.usersByIDs(ctx, client, userIDs)
+
 	var result strings.Builder
 	botsExcluded := 0
 	written := 0
 
 	for _, m := range members {
-		user, _, err := client.GetUser(ctx, m.userID, "")
-		if err != nil {
-			p.logger.Warn("failed to get user details for member", "user_id", m.userID, "error", err)
+		user, ok := users[m.userID]
+		if !ok {
 			format.WriteUser(&result, format.UserEntry{User: &model.User{Id: m.userID, Username: "details unavailable"}})
 			written++
 			continue

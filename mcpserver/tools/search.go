@@ -247,13 +247,9 @@ func (p *MattermostToolProvider) toolCombinedSearch(mcpContext *MCPToolContext, 
 	}
 
 	semanticEnabled := p.searchService != nil && p.searchService.Enabled()
-	userID := ""
-	if semanticEnabled {
-		user, _, err := client.GetMe(ctx, "")
-		if err != nil {
-			return "", fmt.Errorf("failed to get current user: %w", err)
-		}
-		userID = user.Id
+	userID, err := p.resolveUserID(mcpContext)
+	if err != nil {
+		return "", err
 	}
 
 	var semanticResults []searchPostResult
@@ -268,7 +264,7 @@ func (p *MattermostToolProvider) toolCombinedSearch(mcpContext *MCPToolContext, 
 	}
 
 	wg.Go(func() {
-		keywordResults, keywordErr = p.executeKeywordSearch(ctx, client, args)
+		keywordResults, keywordErr = p.executeKeywordSearch(ctx, client, args, userID)
 	})
 
 	wg.Wait()
@@ -305,22 +301,25 @@ func (p *MattermostToolProvider) executeSemanticSearch(ctx context.Context, clie
 		return nil, err
 	}
 
-	channelTeamCache := make(map[string]string)
+	channelIDs := make([]string, 0, len(results))
+	seen := make(map[string]bool, len(results))
 	for _, r := range results {
-		if _, exists := channelTeamCache[r.ChannelID]; exists {
-			continue
+		if !seen[r.ChannelID] {
+			seen[r.ChannelID] = true
+			channelIDs = append(channelIDs, r.ChannelID)
 		}
+	}
 
-		channel, _, chErr := client.GetChannel(ctx, r.ChannelID)
-		if chErr == nil && channel.TeamId != "" {
-			team, _, teamErr := client.GetTeam(ctx, channel.TeamId, "")
-			if teamErr == nil {
-				channelTeamCache[r.ChannelID] = team.DisplayName
-				continue
-			}
+	teamNames := make([]string, len(channelIDs))
+	forEachParallel(len(channelIDs), func(i int) {
+		channel, chErr := p.channel(ctx, client, userID, channelIDs[i])
+		if chErr == nil {
+			teamNames[i] = p.teamDisplayName(ctx, client, userID, channel.TeamId)
 		}
-
-		channelTeamCache[r.ChannelID] = ""
+	})
+	channelTeamCache := make(map[string]string, len(channelIDs))
+	for i, id := range channelIDs {
+		channelTeamCache[id] = teamNames[i]
 	}
 
 	postResults := make([]searchPostResult, 0, len(results))
@@ -345,16 +344,14 @@ func (p *MattermostToolProvider) executeSemanticSearch(ctx context.Context, clie
 }
 
 // executeKeywordSearch runs the Mattermost keyword search and returns enriched results.
-func (p *MattermostToolProvider) executeKeywordSearch(ctx context.Context, client *model.Client4, args CombinedSearchArgs) ([]searchPostResult, error) {
+func (p *MattermostToolProvider) executeKeywordSearch(ctx context.Context, client *model.Client4, args CombinedSearchArgs, userID string) ([]searchPostResult, error) {
 	searchTerm := args.Query
 	teamID := args.TeamID
 
 	channelCache := make(map[string]*model.Channel)
-	teamCache := make(map[string]*model.Team)
-	userCache := make(map[string]*model.User)
 
 	if args.ChannelID != "" {
-		channel, _, chErr := client.GetChannel(ctx, args.ChannelID)
+		channel, chErr := p.channel(ctx, client, userID, args.ChannelID)
 		if chErr != nil {
 			return nil, fmt.Errorf("error fetching channel %s: %w", args.ChannelID, chErr)
 		}
@@ -405,35 +402,45 @@ func (p *MattermostToolProvider) executeKeywordSearch(ctx context.Context, clien
 		posts = posts[:args.KeywordLimit]
 	}
 
+	// Resolve the channels (and their teams) the results live in, a few at a
+	// time, while the authors are fetched in one request.
+	var channelIDs []string
+	userIDs := make([]string, 0, len(posts))
 	for _, post := range posts {
-		if _, exists := channelCache[post.ChannelId]; !exists {
-			channel, _, chErr := client.GetChannel(ctx, post.ChannelId)
-			if chErr == nil {
-				channelCache[post.ChannelId] = channel
-			} else {
-				channelCache[post.ChannelId] = nil
-			}
+		if _, known := channelCache[post.ChannelId]; !known {
+			channelCache[post.ChannelId] = nil
+			channelIDs = append(channelIDs, post.ChannelId)
 		}
+		userIDs = append(userIDs, post.UserId)
+	}
 
-		if channel := channelCache[post.ChannelId]; channel != nil && channel.TeamId != "" {
-			if _, exists := teamCache[channel.TeamId]; !exists {
-				team, _, teamErr := client.GetTeam(ctx, channel.TeamId, "")
-				if teamErr == nil {
-					teamCache[channel.TeamId] = team
-				} else {
-					teamCache[channel.TeamId] = nil
-				}
+	channels := make([]*model.Channel, len(channelIDs))
+	teamNames := make([]string, len(channelIDs))
+	var users map[string]*model.User
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		users = p.usersByIDs(ctx, client, userIDs)
+	})
+	wg.Go(func() {
+		forEachParallel(len(channelIDs), func(i int) {
+			channel, chErr := p.channel(ctx, client, userID, channelIDs[i])
+			if chErr != nil {
+				return
 			}
-		}
+			channels[i] = channel
+			teamNames[i] = p.teamDisplayName(ctx, client, userID, channel.TeamId)
+		})
+	})
+	wg.Wait()
 
-		if _, exists := userCache[post.UserId]; !exists {
-			user, _, userErr := client.GetUser(ctx, post.UserId, "")
-			if userErr == nil {
-				userCache[post.UserId] = user
-			} else {
-				p.logger.Warn("failed to get user for post", "user_id", post.UserId, "error", userErr)
-				userCache[post.UserId] = nil
-			}
+	teamNameByChannel := make(map[string]string, len(channelIDs))
+	for i, id := range channelIDs {
+		channelCache[id] = channels[i]
+		teamNameByChannel[id] = teamNames[i]
+	}
+	if args.ChannelID != "" {
+		if channel := channelCache[args.ChannelID]; channel != nil {
+			teamNameByChannel[args.ChannelID] = p.teamDisplayName(ctx, client, userID, channel.TeamId)
 		}
 	}
 
@@ -453,13 +460,10 @@ func (p *MattermostToolProvider) executeKeywordSearch(ctx context.Context, clien
 			default:
 				result.ChannelName = channel.DisplayName
 			}
-
-			if team := teamCache[channel.TeamId]; team != nil {
-				result.TeamName = team.DisplayName
-			}
+			result.TeamName = teamNameByChannel[post.ChannelId]
 		}
 
-		if user := userCache[post.UserId]; user != nil {
+		if user := users[post.UserId]; user != nil {
 			result.Username = user.Username
 		}
 

@@ -16,10 +16,16 @@ import (
 	"github.com/mattermost/mattermost/server/public/model"
 )
 
+// sincePostsServerCap is the largest number of posts the Mattermost API returns
+// for a single since query. The endpoint takes no page size, so a result at this
+// size means the window continues past what came back.
+const sincePostsServerCap = 1000
+
 // ReadChannelArgs represents arguments for the read_channel tool
 type ReadChannelArgs struct {
 	ChannelID string `json:"channel_id" jsonschema:"The ID of the channel to read from,minLength=26,maxLength=26"`
-	Limit     int    `json:"limit,omitempty" jsonschema:"Number of posts to retrieve (default: 20, max: 100),minimum=1,maximum=100"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"Number of posts to retrieve (default: 20, max: 500),minimum=1,maximum=500"`
+	From      string `json:"from,omitempty" jsonschema:"Only return posts written by this username; combine with since to answer 'did this person post here',maxLength=64"`
 	Since     string `json:"since,omitempty" jsonschema:"Only get posts since this timestamp (ISO 8601 format),format=date-time"`
 	Before    string `json:"before,omitempty" jsonschema:"Return the page of posts immediately before this post ID (history pagination). Mutually exclusive with after/since.,maxLength=26"`
 	After     string `json:"after,omitempty" jsonschema:"Return the page of posts immediately after this post ID (history pagination). Mutually exclusive with before/since.,maxLength=26"`
@@ -64,9 +70,17 @@ type GetUserChannelsArgs struct {
 	PerPage int    `json:"per_page,omitempty" jsonschema:"Number of channels per page (default: 60, max: 200),minimum=1,maximum=200"`
 }
 
+// GetActiveChannelsArgs represents arguments for the get_active_channels tool
+type GetActiveChannelsArgs struct {
+	Since        string   `json:"since" jsonschema:"Only return channels whose last post is at or after this time (ISO 8601 / RFC3339 timestamp),format=date-time"`
+	TeamID       string   `json:"team_id,omitempty" jsonschema:"Optional team ID to filter by team; DMs and GMs have no team and are excluded by this filter,maxLength=26"`
+	ChannelTypes []string `json:"channel_types,omitempty" jsonschema:"Optional channel type filter: 'O' public, 'P' private, 'D' direct message, 'G' group message (default: all types)"`
+	Limit        int      `json:"limit,omitempty" jsonschema:"Maximum number of channels to return (default: 60, max: 200),minimum=1,maximum=200"`
+}
+
 // Tool description constants for channel-related tools.
 const (
-	readChannelDescription = "Read recent posts from a Mattermost channel, with history pagination. Parameters: channel_id (required), limit (1-100, default 20), page (default 0), since (ISO 8601 timestamp), before (post ID), after (post ID). Use before/after with a post ID to page through older/newer history; since/before/after are mutually exclusive. Returns post details including author, content, and timestamps. Example: {\"channel_id\": \"h5wqm8kxptbztfgzpaxbsqozah\", \"limit\": 10, \"before\": \"8xqzn3pfmtbyfkr9hqbw4hheoa\"}"
+	readChannelDescription = "Read recent posts from a Mattermost channel, with history pagination. Parameters: channel_id (required), limit (1-500, default 20), page (default 0), from (username), since (ISO 8601 timestamp), before (post ID), after (post ID). Use before/after with a post ID to page through older/newer history; since/before/after are mutually exclusive. With since, the whole window is scanned (oldest first) and the response says if it was cut short and how to continue. Use from with since to check whether one person posted in a channel without reading everything else — e.g. {\"channel_id\": \"...\", \"since\": \"2024-01-01T00:00:00Z\", \"from\": \"jane.doe\"} answers 'did jane post here today' in one call. Returns post details including author, content, and timestamps. Example: {\"channel_id\": \"h5wqm8kxptbztfgzpaxbsqozah\", \"limit\": 10, \"before\": \"8xqzn3pfmtbyfkr9hqbw4hheoa\"}"
 
 	createChannelDescription = "Create a new channel in Mattermost. Parameters: name (URL-friendly), display_name (user-visible), type ('O' for public, 'P' for private), team_id (required), purpose (optional), header (optional). Returns created channel details. Example: {\"name\": \"dev-chat\", \"display_name\": \"Development Chat\", \"type\": \"O\", \"team_id\": \"w1jkn9ebkiby7qezqfxk7o5ney\"}"
 
@@ -75,6 +89,8 @@ const (
 	getChannelMembersDescription = "Get members of a channel with pagination support. Parameters: channel_id (required), limit (1-200, default 50), page (0+, default 0), exclude_bots (optional, default true). Returns user details for each member including username, email, display name, and role. Example: {\"channel_id\": \"h5wqm8kxptbztfgzpaxbsqozah\", \"limit\": 25, \"page\": 0}"
 
 	getUserChannelsDescription = "Get channels the current user is a member of, including DMs and GMs. Parameters: team_id (optional, filter by team), page (default 0), per_page (1-200, default 60). Returns channel details with team info and pagination. Example: {\"team_id\": \"w1jkn9ebkiby7qezqfxk7o5ney\", \"per_page\": 60}"
+
+	getActiveChannelsDescription = "Get channels with recent activity: channels the current user is a member of (including DMs and GMs) whose last post is at or after the given time, sorted newest first. DM rows show the other participant's username. Use this to answer questions like 'who wrote to me today' or 'what happened while I was away' — first call this, then read_channel only the channels it returns, instead of reading every channel. Parameters: since (required, ISO 8601), team_id (optional), channel_types (optional list of 'O' public, 'P' private, 'D' direct, 'G' group), limit (1-200, default 60). Example: {\"since\": \"2024-01-01T00:00:00Z\", \"channel_types\": [\"D\", \"G\"]}"
 )
 
 // getChannelTools returns all channel-related tools
@@ -86,6 +102,7 @@ func (p *MattermostToolProvider) getChannelTools() []MCPTool {
 		mcpReadTool(p, "get_channel_members", getChannelMembersDescription, p.toolGetChannelMembers),
 		mcpTool(p, "add_channel_member", "Add a user to a channel (channel membership). Parameters: user_id (required), channel_id (required). Returns confirmation message.", p.toolAddChannelMember),
 		mcpReadTool(p, "get_user_channels", getUserChannelsDescription, p.toolGetUserChannels),
+		mcpReadTool(p, "get_active_channels", getActiveChannelsDescription, p.toolGetActiveChannels),
 		mcpReadTool(p, "get_channel_stats", getChannelStatsDescription, p.toolGetChannelStats),
 		mcpReadTool(p, "get_channel_member_counts", getChannelMemberCountsDescription, p.toolGetChannelMemberCounts),
 		mcpReadTool(p, "search_channels", searchChannelsDescription, p.toolSearchChannels),
@@ -112,8 +129,8 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 	if args.Limit == 0 {
 		args.Limit = 20
 	}
-	if args.Limit > 100 {
-		args.Limit = 100
+	if args.Limit > 500 {
+		args.Limit = 500
 	}
 	if args.Page < 0 {
 		args.Page = 0
@@ -170,44 +187,108 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 			teamDisplayName = "No Team"
 		}
 	} else {
-		team, _, teamErr := client.GetTeam(ctx, channel.TeamId, "")
+		team, teamErr := p.team(ctx, client, mcpContext.UserID, channel.TeamId)
 		if teamErr != nil {
 			return "", fmt.Errorf("error fetching team: %w", teamErr)
 		}
 		teamDisplayName = team.DisplayName
 	}
 
-	// Get posts from the channel. before/after page relative to a post ID for
-	// history pagination; otherwise page through the channel from the top.
-	var posts *model.PostList
-	switch {
-	case args.Before != "":
-		posts, _, err = client.GetPostsBefore(ctx, args.ChannelID, args.Before, args.Page, args.Limit, "", false, false)
-	case args.After != "":
-		posts, _, err = client.GetPostsAfter(ctx, args.ChannelID, args.After, args.Page, args.Limit, "", false, false)
-	default:
-		posts, _, err = client.GetPostsForChannel(ctx, args.ChannelID, args.Page, args.Limit, "", false, false)
-	}
-	if err != nil {
-		return "", fmt.Errorf("error fetching posts: %w", err)
+	// Resolve the author filter to a user ID before fetching, so an unknown
+	// username fails loudly instead of looking like an empty channel.
+	var fromUserID, fromUsername string
+	if strings.TrimSpace(args.From) != "" {
+		fromUsername = strings.TrimPrefix(strings.TrimSpace(args.From), "@")
+		fromUser, _, fromErr := client.GetUserByUsername(ctx, fromUsername, "")
+		if fromErr != nil {
+			return "", fmt.Errorf("error resolving from=%q: %w", fromUsername, fromErr)
+		}
+		fromUserID = fromUser.Id
 	}
 
-	// Filter by since timestamp if provided
-	var filteredPosts []*model.Post
-	for _, post := range posts.ToSlice() {
-		if since == 0 || post.CreateAt >= since {
-			filteredPosts = append(filteredPosts, post)
+	// Get posts from the channel. before/after page relative to a post ID for
+	// history pagination; otherwise page through the channel from the top.
+	var windowPosts []*model.Post
+	windowComplete := true
+	if since > 0 {
+		posts, _, sinceErr := client.GetPostsSince(ctx, args.ChannelID, since, false)
+		if sinceErr != nil {
+			return "", fmt.Errorf("error fetching posts: %w", sinceErr)
+		}
+		// The since endpoint also returns older posts edited after the
+		// timestamp; keep only posts created inside the window.
+		for _, post := range posts.ToSlice() {
+			if post.CreateAt >= since {
+				windowPosts = append(windowPosts, post)
+			}
+		}
+		// The since endpoint takes no page size and the server caps its result,
+		// so a window at the cap may extend past what was returned.
+		if len(posts.Order) >= sincePostsServerCap {
+			windowComplete = false
+		}
+	} else {
+		windowPosts, err = p.fetchPostsPaged(mcpContext, args)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	// Sort chronologically (oldest first) for natural reading order
+	slices.SortFunc(windowPosts, func(a, b *model.Post) int {
+		return cmp.Compare(a.CreateAt, b.CreateAt)
+	})
+
+	// Apply the author filter to the whole fetched window, before the limit, so
+	// the limit counts matching posts rather than posts scanned.
+	scanned := len(windowPosts)
+	filteredPosts := windowPosts
+	if fromUserID != "" {
+		filteredPosts = nil
+		for _, post := range windowPosts {
+			if post.UserId == fromUserID {
+				filteredPosts = append(filteredPosts, post)
+			}
 		}
 	}
 
 	if len(filteredPosts) == 0 {
+		if fromUserID != "" {
+			verdict := fmt.Sprintf("no posts by @%s among the %d posts in the specified timeframe", fromUsername, scanned)
+			if !windowComplete {
+				verdict += fmt.Sprintf(" — but the window exceeds the %d-post server cap, so it was only partially scanned; narrow the timeframe to be certain", sincePostsServerCap)
+			}
+			return verdict, nil
+		}
 		return "no posts found in the specified timeframe", nil
 	}
 
-	// Sort chronologically (oldest first) for natural reading order
-	slices.SortFunc(filteredPosts, func(a, b *model.Post) int {
-		return cmp.Compare(a.CreateAt, b.CreateAt)
-	})
+	// The window can exceed the limit; keep the oldest posts so the caller reads
+	// forward without gaps, and say how to continue.
+	var truncationNote string
+	matched := len(filteredPosts)
+	if matched > args.Limit {
+		filteredPosts = filteredPosts[:args.Limit]
+	}
+	if since > 0 && (matched > args.Limit || !windowComplete) {
+		lastShown := filteredPosts[len(filteredPosts)-1]
+		continueHint := fmt.Sprintf("To continue, call read_channel with after=%q or since=%q.",
+			lastShown.Id, time.UnixMilli(lastShown.CreateAt).UTC().Format(time.RFC3339))
+		switch {
+		case !windowComplete:
+			truncationNote = fmt.Sprintf(
+				"\nThis window holds more posts than the server returns in one request (cap: %d), so it was scanned only up to %s. Showing %d post(s) from that part. %s\n",
+				sincePostsServerCap,
+				time.UnixMilli(windowPosts[len(windowPosts)-1].CreateAt).UTC().Format(time.RFC3339),
+				len(filteredPosts), continueHint,
+			)
+		default:
+			truncationNote = fmt.Sprintf(
+				"\nShowing the oldest %d of %d matching posts in this window. %s\n",
+				args.Limit, matched, continueHint,
+			)
+		}
+	}
 
 	// Collect unique user IDs and fetch all at once
 	userIDs := make([]string, 0)
@@ -241,7 +322,11 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 	// Format the response
 	var result strings.Builder
 	fmt.Fprintf(&result, "Channel: %s (Team: %s)\n", channelDisplayName, teamDisplayName)
-	fmt.Fprintf(&result, "Found %d posts:\n\n", len(filteredPosts))
+	if fromUserID != "" {
+		fmt.Fprintf(&result, "Found %d posts by @%s (of %d posts scanned):\n\n", len(filteredPosts), fromUsername, scanned)
+	} else {
+		fmt.Fprintf(&result, "Found %d posts:\n\n", len(filteredPosts))
+	}
 
 	postIndex := format.BuildPostIndex(filteredPosts)
 	for i, post := range filteredPosts {
@@ -259,7 +344,68 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 		})
 	}
 
+	result.WriteString(truncationNote)
+
 	return result.String(), nil
+}
+
+// fetchPostsPaged retrieves posts for read_channel's offset-based modes
+// (top-of-channel, before, after), transparently splitting requests that
+// exceed the API's per-page cap into consecutive page fetches.
+func (p *MattermostToolProvider) fetchPostsPaged(mcpContext *MCPToolContext, args ReadChannelArgs) ([]*model.Post, error) {
+	client := mcpContext.Client
+	ctx := mcpContext.Ctx
+
+	const apiMaxPerPage = 200
+
+	fetchPage := func(pageIndex, perPage int) ([]*model.Post, error) {
+		var posts *model.PostList
+		var err error
+		switch {
+		case args.Before != "":
+			posts, _, err = client.GetPostsBefore(ctx, args.ChannelID, args.Before, pageIndex, perPage, "", false, false)
+		case args.After != "":
+			posts, _, err = client.GetPostsAfter(ctx, args.ChannelID, args.After, pageIndex, perPage, "", false, false)
+		default:
+			posts, _, err = client.GetPostsForChannel(ctx, args.ChannelID, pageIndex, perPage, "", false, false)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error fetching posts (page %d): %w", pageIndex, err)
+		}
+		return posts.ToSlice(), nil
+	}
+
+	if args.Limit <= apiMaxPerPage {
+		return fetchPage(args.Page, args.Limit)
+	}
+
+	// Re-express the requested window [page*limit, page*limit+limit) in
+	// api-sized pages; the leading skip trims the overlap of the first page.
+	startOffset := args.Page * args.Limit
+	pageIndex := startOffset / apiMaxPerPage
+	skip := startOffset % apiMaxPerPage
+
+	var collected []*model.Post
+	for len(collected) < skip+args.Limit {
+		chunk, err := fetchPage(pageIndex, apiMaxPerPage)
+		if err != nil {
+			return nil, err
+		}
+		collected = append(collected, chunk...)
+		if len(chunk) < apiMaxPerPage {
+			break
+		}
+		pageIndex++
+	}
+
+	if skip >= len(collected) {
+		return nil, nil
+	}
+	collected = collected[skip:]
+	if len(collected) > args.Limit {
+		collected = collected[:args.Limit]
+	}
+	return collected, nil
 }
 
 // toolCreateChannel implements the create_channel tool.
@@ -345,7 +491,7 @@ func (p *MattermostToolProvider) toolGetChannelInfo(mcpContext *MCPToolContext, 
 		channels = []*model.Channel{channel}
 	case args.ChannelName != "":
 		// Unified lookup: try display name match, then URL name match, then substring
-		channels, lastError = p.tryFindChannelByDisplayName(ctx, client, args.ChannelName, args.TeamID)
+		channels, lastError = p.tryFindChannelByDisplayName(mcpContext, args.ChannelName, args.TeamID)
 		if lastError != nil {
 			return "failed to search for channels", lastError
 		}
@@ -360,7 +506,7 @@ func (p *MattermostToolProvider) toolGetChannelInfo(mcpContext *MCPToolContext, 
 
 		// If still nothing and we have a team scope, try substring match on display name
 		if len(channels) == 0 && args.TeamID != "" {
-			channels, err = p.tryFindChannelBySubstring(ctx, client, args.ChannelName, args.TeamID)
+			channels, err = p.tryFindChannelBySubstring(mcpContext, args.ChannelName, args.TeamID)
 			if err != nil {
 				return "", err
 			}
@@ -404,15 +550,8 @@ func (p *MattermostToolProvider) toolGetChannelInfo(mcpContext *MCPToolContext, 
 	// Single channel found - format as before (backward compatible)
 	channel := channels[0]
 
-	// Get team info
 	// DM and group message channels have no team.
-	var teamName string
-	if channel.TeamId != "" {
-		team, _, teamErr := client.GetTeam(ctx, channel.TeamId, "")
-		if teamErr == nil {
-			teamName = team.DisplayName
-		}
-	}
+	teamName := p.teamDisplayName(ctx, client, mcpContext.UserID, channel.TeamId)
 
 	// Get member count
 	var memberCount int64 = -1
@@ -468,39 +607,33 @@ func (p *MattermostToolProvider) formatMultipleChannels(ctx context.Context, cli
 	var result strings.Builder
 	fmt.Fprintf(&result, "Found %d channels with matching name:\n\n", len(channels))
 
-	// Cache teams to avoid duplicate fetches
-	teamCache := make(map[string]*model.Team)
+	// Per-channel details are independent of each other; fetch them a few
+	// channels at a time.
+	teamNames := make([]string, len(channels))
+	memberCounts := make([]int64, len(channels))
+	roles := make([]string, len(channels))
+	forEachParallel(len(channels), func(i int) {
+		channel := channels[i]
+		teamNames[i] = p.teamDisplayName(ctx, client, userID, channel.TeamId)
 
-	for i, channel := range channels {
-		// Get team info from cache or fetch
-		var teamName string
-		team, exists := teamCache[channel.TeamId]
-		if !exists && channel.TeamId != "" {
-			fetchedTeam, _, err := client.GetTeam(ctx, channel.TeamId, "")
-			if err == nil {
-				team = fetchedTeam
-				teamCache[channel.TeamId] = team
-			}
-		}
-		if team != nil {
-			teamName = team.DisplayName
-		}
-
-		// Get member count
-		var memberCount int64 = -1
+		memberCounts[i] = -1
 		stats, _, err := client.GetChannelStats(ctx, channel.Id, "", false)
 		if err == nil {
-			memberCount = stats.MemberCount
+			memberCounts[i] = stats.MemberCount
 		}
 
+		roles[i] = p.lookupChannelRole(ctx, client, channel.Id, userID)
+	})
+
+	for i, channel := range channels {
 		format.WriteChannel(&result, format.ChannelEntry{
 			HeaderLabel: fmt.Sprintf("%d. %s", i+1, channelDisplayNameOrFallback(channel)),
 			Channel:     channel,
 			DisplayName: channelDisplayNameOrFallback(channel),
-			TeamName:    teamName,
+			TeamName:    teamNames[i],
 			TeamID:      channel.TeamId,
-			MemberCount: memberCount,
-			Role:        p.lookupChannelRole(ctx, client, channel.Id, userID),
+			MemberCount: memberCounts[i],
+			Role:        roles[i],
 		})
 	}
 
@@ -584,15 +717,17 @@ func (p *MattermostToolProvider) toolAddChannelMember(mcpContext *MCPToolContext
 
 // tryFindChannelByDisplayName attempts to find channels by display name
 // Returns all exact matches when teamID is not provided, or single match when teamID is specified
-func (p *MattermostToolProvider) tryFindChannelByDisplayName(ctx context.Context, client *model.Client4, displayName, teamID string) ([]*model.Channel, error) {
+func (p *MattermostToolProvider) tryFindChannelByDisplayName(mcpContext *MCPToolContext, displayName, teamID string) ([]*model.Channel, error) {
+	ctx := mcpContext.Ctx
+	client := mcpContext.Client
 	if teamID != "" {
 		// Search within specific team - should only return one result
-		user, _, userErr := client.GetMe(ctx, "")
+		userID, userErr := p.resolveUserID(mcpContext)
 		if userErr != nil {
-			return nil, fmt.Errorf("error getting current user: %w", userErr)
+			return nil, userErr
 		}
 
-		channels, _, channelErr := client.GetChannelsForTeamForUser(ctx, teamID, user.Id, false, "")
+		channels, _, channelErr := client.GetChannelsForTeamForUser(ctx, teamID, userID, false, "")
 		if channelErr != nil {
 			return nil, fmt.Errorf("error fetching team channels: %w", channelErr)
 		}
@@ -700,13 +835,13 @@ func (p *MattermostToolProvider) tryFindChannelByName(ctx context.Context, clien
 
 // tryFindChannelBySubstring does a case-insensitive substring match on display names
 // within a specific team. Used as a fallback when exact matches fail.
-func (p *MattermostToolProvider) tryFindChannelBySubstring(ctx context.Context, client *model.Client4, term, teamID string) ([]*model.Channel, error) {
-	user, _, userErr := client.GetMe(ctx, "")
+func (p *MattermostToolProvider) tryFindChannelBySubstring(mcpContext *MCPToolContext, term, teamID string) ([]*model.Channel, error) {
+	userID, userErr := p.resolveUserID(mcpContext)
 	if userErr != nil {
-		return nil, fmt.Errorf("error getting current user: %w", userErr)
+		return nil, userErr
 	}
 
-	channels, _, channelErr := client.GetChannelsForTeamForUser(ctx, teamID, user.Id, false, "")
+	channels, _, channelErr := mcpContext.Client.GetChannelsForTeamForUser(mcpContext.Ctx, teamID, userID, false, "")
 	if channelErr != nil {
 		return nil, fmt.Errorf("error fetching team channels: %w", channelErr)
 	}
@@ -753,16 +888,15 @@ func (p *MattermostToolProvider) toolGetUserChannels(mcpContext *MCPToolContext,
 	client := mcpContext.Client
 	ctx := mcpContext.Ctx
 
-	// Get current user
-	user, _, err := client.GetMe(ctx, "")
+	userID, err := p.resolveUserID(mcpContext)
 	if err != nil {
-		return "", fmt.Errorf("failed to get current user: %w", err)
+		return "", err
 	}
 	// Fetch all channels for the user (including DMs, GMs, and team channels).
 	// NOTE: GetChannelsForUserWithLastDeleteAt does not support server-side pagination,
 	// so we fetch all channels and paginate in memory. This is a Mattermost API limitation.
 	// Pass 0 for lastDeleteAt to get all channels without filtering.
-	allChannels, _, err := client.GetChannelsForUserWithLastDeleteAt(ctx, user.Id, 0)
+	allChannels, _, err := client.GetChannelsForUserWithLastDeleteAt(ctx, userID, 0)
 	if err != nil {
 		return "", fmt.Errorf("failed to get channels for user: %w", err)
 	}
@@ -801,7 +935,7 @@ func (p *MattermostToolProvider) toolGetUserChannels(mcpContext *MCPToolContext,
 		DisplayName string
 	}
 	teamInfoMap := make(map[string]*TeamInfo)
-	userTeams, _, teamsErr := client.GetTeamsForUser(ctx, user.Id, "")
+	userTeams, _, teamsErr := client.GetTeamsForUser(ctx, userID, "")
 	if teamsErr != nil {
 		p.logger.Warn("failed to fetch user teams for team info lookup, team details will be omitted", "error", teamsErr)
 	} else {
@@ -845,6 +979,156 @@ func (p *MattermostToolProvider) toolGetUserChannels(mcpContext *MCPToolContext,
 	}
 
 	return result.String(), nil
+}
+
+// toolGetActiveChannels implements the get_active_channels tool.
+func (p *MattermostToolProvider) toolGetActiveChannels(mcpContext *MCPToolContext, args GetActiveChannelsArgs) (string, error) {
+	if strings.TrimSpace(args.Since) == "" {
+		return "", fmt.Errorf("since cannot be empty")
+	}
+	sinceMillis, err := parseTimeMillis(args.Since)
+	if err != nil {
+		return "", err
+	}
+	if err = optionalID("team_id", args.TeamID); err != nil {
+		return "", err
+	}
+	typeFilter := make(map[model.ChannelType]bool, len(args.ChannelTypes))
+	for _, rawType := range args.ChannelTypes {
+		channelType := model.ChannelType(strings.ToUpper(strings.TrimSpace(rawType)))
+		switch channelType {
+		case model.ChannelTypeOpen, model.ChannelTypePrivate, model.ChannelTypeDirect, model.ChannelTypeGroup:
+			typeFilter[channelType] = true
+		default:
+			return "", fmt.Errorf("invalid channel type %q (expected 'O', 'P', 'D' or 'G')", rawType)
+		}
+	}
+	if args.Limit <= 0 {
+		args.Limit = 60
+	}
+	if args.Limit > 200 {
+		args.Limit = 200
+	}
+
+	client := mcpContext.Client
+	ctx := mcpContext.Ctx
+
+	userID, err := p.resolveUserID(mcpContext)
+	if err != nil {
+		return "", err
+	}
+
+	// One request returns every channel the user is in, with last_post_at populated.
+	allChannels, _, err := client.GetChannelsForUserWithLastDeleteAt(ctx, userID, 0)
+	if err != nil {
+		return "", fmt.Errorf("failed to get channels for user: %w", err)
+	}
+
+	var channels []*model.Channel
+	for _, channel := range allChannels {
+		if channel.LastPostAt < sinceMillis {
+			continue
+		}
+		if args.TeamID != "" && channel.TeamId != args.TeamID {
+			continue
+		}
+		if len(typeFilter) > 0 && !typeFilter[channel.Type] {
+			continue
+		}
+		channels = append(channels, channel)
+	}
+
+	slices.SortFunc(channels, func(a, b *model.Channel) int { return cmp.Compare(b.LastPostAt, a.LastPostAt) })
+
+	totalCount := len(channels)
+	if totalCount == 0 {
+		return fmt.Sprintf("No channels with posts since %s.", args.Since), nil
+	}
+	truncated := totalCount > args.Limit
+	if truncated {
+		channels = channels[:args.Limit]
+	}
+
+	dmUsernames := p.resolveDirectChannelUsernames(ctx, client, userID, channels)
+
+	teamNames := make(map[string]string)
+	if userTeams, _, teamsErr := client.GetTeamsForUser(ctx, userID, ""); teamsErr != nil {
+		p.logger.Warn("failed to fetch user teams for team info lookup, team details will be omitted", "error", teamsErr)
+	} else {
+		for _, team := range userTeams {
+			teamNames[team.Id] = team.DisplayName
+		}
+	}
+
+	var result strings.Builder
+	fmt.Fprintf(&result, "Active channels since %s (showing %d of %d, newest first):\n\n", args.Since, len(channels), totalCount)
+
+	for i, channel := range channels {
+		label := channel.DisplayName
+		switch channel.Type {
+		case model.ChannelTypeDirect:
+			if otherID := channel.GetOtherUserIdForDM(userID); otherID == "" {
+				label = "DM with yourself (saved messages)"
+			} else if username, ok := dmUsernames[otherID]; ok {
+				label = "DM with @" + username
+			} else {
+				label = "Direct Message"
+			}
+		case model.ChannelTypeGroup:
+			if label == "" {
+				label = "Group Message"
+			}
+		default:
+			if label == "" {
+				label = channel.Name
+			}
+		}
+
+		format.WriteChannelActivity(&result, format.ChannelActivityEntry{
+			Index:    i + 1,
+			Channel:  channel,
+			Label:    label,
+			TeamName: teamNames[channel.TeamId],
+		})
+	}
+
+	if truncated {
+		fmt.Fprintf(&result, "\nShowing only the %d most recently active channels of %d matching. Narrow the time window or raise the limit to see the rest.\n", args.Limit, totalCount)
+	}
+
+	return result.String(), nil
+}
+
+// resolveDirectChannelUsernames batch-resolves the usernames of DM counterparts for the
+// given channels in a single API call. Returns a map of user ID to username; on lookup
+// failure the map is empty and callers fall back to a generic label.
+func (p *MattermostToolProvider) resolveDirectChannelUsernames(ctx context.Context, client *model.Client4, currentUserID string, channels []*model.Channel) map[string]string {
+	idSet := make(map[string]bool)
+	for _, channel := range channels {
+		if channel.Type != model.ChannelTypeDirect {
+			continue
+		}
+		if otherID := channel.GetOtherUserIdForDM(currentUserID); otherID != "" {
+			idSet[otherID] = true
+		}
+	}
+	if len(idSet) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	users, _, err := client.GetUsersByIds(ctx, ids)
+	if err != nil {
+		p.logger.Warn("failed to resolve DM counterpart usernames, falling back to generic labels", "error", err)
+		return nil
+	}
+	usernames := make(map[string]string, len(users))
+	for _, u := range users {
+		usernames[u.Id] = u.Username
+	}
+	return usernames
 }
 
 // --- Additional channel tools (stats, search, list, lifecycle) ---
@@ -989,7 +1273,7 @@ func (p *MattermostToolProvider) toolSearchChannels(mcpContext *MCPToolContext, 
 		}
 	}
 
-	return p.formatChannelList(ctx, client, channels, fmt.Sprintf("channels matching '%s'", args.Term)), nil
+	return p.formatChannelList(mcpContext, channels, fmt.Sprintf("channels matching '%s'", args.Term)), nil
 }
 
 // toolListTeamChannels implements the list_team_channels tool.
@@ -1015,7 +1299,7 @@ func (p *MattermostToolProvider) toolListTeamChannels(mcpContext *MCPToolContext
 	channels := make([]*model.Channel, 0, len(public)+len(private))
 	channels = append(channels, public...)
 	channels = append(channels, private...)
-	return p.formatChannelList(ctx, client, channels, "team channels"), nil
+	return p.formatChannelList(mcpContext, channels, "team channels"), nil
 }
 
 // toolListArchivedChannels implements the list_archived_channels tool.
@@ -1030,7 +1314,7 @@ func (p *MattermostToolProvider) toolListArchivedChannels(mcpContext *MCPToolCon
 		return "", fmt.Errorf("error fetching archived channels: %w", err)
 	}
 
-	return p.formatChannelList(mcpContext.Ctx, mcpContext.Client, channels, "archived channels"), nil
+	return p.formatChannelList(mcpContext, channels, "archived channels"), nil
 }
 
 // toolUpdateChannel implements the update_channel tool.
@@ -1102,29 +1386,19 @@ func (p *MattermostToolProvider) toolConvertChannelPrivacy(mcpContext *MCPToolCo
 
 // formatChannelList renders a slice of channels with team context, resolving team
 // display names via a local cache.
-func (p *MattermostToolProvider) formatChannelList(ctx context.Context, client *model.Client4, channels []*model.Channel, noun string) string {
+func (p *MattermostToolProvider) formatChannelList(mcpContext *MCPToolContext, channels []*model.Channel, noun string) string {
 	if len(channels) == 0 {
 		return fmt.Sprintf("no %s found", noun)
 	}
 
-	teamCache := make(map[string]string)
 	var result strings.Builder
 	fmt.Fprintf(&result, "Found %d %s:\n\n", len(channels), noun)
 	for i, channel := range channels {
-		teamName := ""
-		if channel.TeamId != "" {
-			if name, ok := teamCache[channel.TeamId]; ok {
-				teamName = name
-			} else if team, _, err := client.GetTeam(ctx, channel.TeamId, ""); err == nil {
-				teamName = team.DisplayName
-				teamCache[channel.TeamId] = teamName
-			}
-		}
 		format.WriteChannel(&result, format.ChannelEntry{
 			HeaderLabel: fmt.Sprintf("%d. %s", i+1, channelDisplayNameOrFallback(channel)),
 			Channel:     channel,
 			DisplayName: channelDisplayNameOrFallback(channel),
-			TeamName:    teamName,
+			TeamName:    p.teamDisplayName(mcpContext.Ctx, mcpContext.Client, mcpContext.UserID, channel.TeamId),
 			TeamID:      channel.TeamId,
 			MemberCount: -1,
 		})

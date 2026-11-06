@@ -8,16 +8,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/mattermost/mattermost-plugin-agents/v2/search"
 )
+
+// semanticUnavailableCooldown is how long the service reports itself disabled
+// after the plugin answered that semantic search is not available. Without it
+// every search_posts call would pay a callback round trip to learn the same
+// thing again.
+const semanticUnavailableCooldown = 10 * time.Minute
 
 // HTTPSemanticSearchService provides semantic search by calling back to the plugin API.
 // This allows external MCP servers (HTTP, Stdio) to access semantic search capabilities.
 type HTTPSemanticSearchService struct {
 	pluginURL string
 	client    *http.Client
+
+	mu               sync.Mutex
+	unavailableUntil time.Time
+	now              func() time.Time
 }
 
 // NewHTTPSemanticSearchService creates a new HTTP-based semantic search service.
@@ -26,13 +37,22 @@ func NewHTTPSemanticSearchService(pluginURL string) *HTTPSemanticSearchService {
 	return &HTTPSemanticSearchService{
 		pluginURL: pluginURL,
 		client:    &http.Client{Timeout: 30 * time.Second},
+		now:       time.Now,
 	}
 }
 
-// Enabled returns true since this service is always available when created.
-// The actual availability check happens at the plugin endpoint.
+// Enabled reports whether a search is worth attempting: true until the plugin
+// answers that semantic search is not available, then false for the cooldown.
 func (s *HTTPSemanticSearchService) Enabled() bool {
-	return true
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.now().Before(s.unavailableUntil)
+}
+
+func (s *HTTPSemanticSearchService) markUnavailable() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unavailableUntil = s.now().Add(semanticUnavailableCooldown)
 }
 
 // httpSearchRequest represents the request body sent to the plugin endpoint
@@ -78,8 +98,13 @@ func (s *HTTPSemanticSearchService) Search(ctx context.Context, query string, op
 		return nil, err
 	}
 
-	// Handle non-200 responses
+	// Handle non-200 responses. The plugin answers 503 when semantic search
+	// is not configured; a 404 means the plugin or route is not there at all.
+	// Neither changes until the server is reconfigured.
 	if status != http.StatusOK {
+		if status == http.StatusServiceUnavailable || status == http.StatusNotFound {
+			s.markUnavailable()
+		}
 		var errResp httpSearchResponse
 		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
 			return nil, fmt.Errorf("search failed: %s", errResp.Error)
