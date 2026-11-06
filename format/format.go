@@ -138,6 +138,9 @@ type PostEntry struct {
 	TeamName    string
 	ShowChannel bool // show Channel ID line
 
+	// Compact renders the post as a one-line header followed by the message,
+	// about half the size of the labeled layout.
+	Compact bool
 }
 
 // FormatPost writes a single formatted post entry to the builder.
@@ -145,6 +148,10 @@ func WritePost(w *strings.Builder, entry PostEntry) {
 	username := entry.Username
 	if username == "" {
 		username = "Unknown User"
+	}
+	if entry.Compact {
+		writePostCompact(w, entry, username)
+		return
 	}
 
 	// Header line
@@ -185,7 +192,54 @@ func WritePost(w *strings.Builder, entry PostEntry) {
 		fmt.Fprintf(w, "Time: %s\n", TimeFromMillis(entry.Post.CreateAt))
 	}
 
-	fmt.Fprintf(w, "Message: %s\n\n", PostBody(entry.Post))
+	fmt.Fprintf(w, "Message: %s\n\n", postBodyOrPlaceholder(entry.Post))
+}
+
+// compactTimeLayout drops seconds: posts are read for their order and
+// approximate time, and IDs identify them exactly.
+const compactTimeLayout = "2006-01-02 15:04Z"
+
+// writePostCompact writes a post as
+//
+//	[Post 3] 2026-03-10 12:00Z @alice id=<post> root=<root> #Ops (Team) (reply to Post 1)
+//	message text
+//
+// with optional parts omitted when empty.
+func writePostCompact(w *strings.Builder, entry PostEntry, username string) {
+	fmt.Fprintf(w, "[%s]", entry.HeaderLabel)
+	if entry.Post.CreateAt > 0 {
+		fmt.Fprintf(w, " %s", time.UnixMilli(entry.Post.CreateAt).UTC().Format(compactTimeLayout))
+	}
+	fmt.Fprintf(w, " @%s id=%s", username, entry.Post.Id)
+	if entry.Post.RootId != "" {
+		fmt.Fprintf(w, " root=%s", entry.Post.RootId)
+	}
+	if entry.ChannelName != "" {
+		fmt.Fprintf(w, " #%s", entry.ChannelName)
+		if entry.TeamName != "" {
+			fmt.Fprintf(w, " (%s)", entry.TeamName)
+		}
+	}
+	if entry.ShowChannel {
+		fmt.Fprintf(w, " channel=%s", entry.Post.ChannelId)
+	}
+	if entry.Score > 0 {
+		fmt.Fprintf(w, " score=%.2f", entry.Score)
+	}
+	if entry.ReplyAnnotation != "" {
+		fmt.Fprintf(w, " %s", entry.ReplyAnnotation)
+	}
+	fmt.Fprintf(w, "\n%s\n\n", postBodyOrPlaceholder(entry.Post))
+}
+
+// postBodyOrPlaceholder is PostBody with a placeholder for posts that carry
+// only files, so they do not read as empty messages.
+func postBodyOrPlaceholder(post *model.Post) string {
+	body := PostBody(post)
+	if strings.TrimSpace(body) == "" && len(post.FileIds) > 0 {
+		return fmt.Sprintf("[%d file(s) attached]", len(post.FileIds))
+	}
+	return body
 }
 
 // PostInfoEntry holds data for formatting a single post's metadata/context.

@@ -208,6 +208,7 @@ func (p *MattermostToolProvider) toolReadPost(mcpContext *MCPToolContext, args R
 
 	for i, post := range posts {
 		format.WritePost(&result, format.PostEntry{
+			Compact:     p.compactOutput,
 			HeaderLabel: fmt.Sprintf("Post %d", i+1),
 			Username:    usernames[post.UserId],
 			Post:        post,
@@ -779,6 +780,7 @@ func (p *MattermostToolProvider) formatPostListChrono(mcpContext *MCPToolContext
 			username = "Unknown User"
 		}
 		format.WritePost(&result, format.PostEntry{
+			Compact:     p.compactOutput,
 			HeaderLabel: fmt.Sprintf("Post %d", i+1),
 			Username:    username,
 			Post:        post,

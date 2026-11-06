@@ -566,3 +566,35 @@ func TestToolGetActiveChannelsLastPost(t *testing.T) {
 		})
 	}
 }
+
+func TestReadChannelNamesDirectMessage(t *testing.T) {
+	meID := model.NewId()
+	friend := &model.User{Id: model.NewId(), Username: "friend"}
+	name := meID + "__" + friend.Id
+	if friend.Id < meID {
+		name = friend.Id + "__" + meID
+	}
+	dm := &model.Channel{Id: model.NewId(), Type: model.ChannelTypeDirect, Name: name}
+	post := &model.Post{Id: model.NewId(), ChannelId: dm.Id, UserId: meID, Message: "hello", CreateAt: 1000}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/channels/"+dm.Id, func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, dm)
+	})
+	mux.HandleFunc("/api/v4/channels/"+dm.Id+"/posts", func(w http.ResponseWriter, _ *http.Request) {
+		list := model.NewPostList()
+		list.AddPost(post)
+		list.AddOrder(post.Id)
+		writeTestJSON(w, list)
+	})
+	mux.HandleFunc("/api/v4/users/ids", usersByIDsHandler(t, []*model.User{{Id: meID, Username: "me"}, friend}))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	provider := newTestProvider(t, ts.URL)
+	mcpCtx := &MCPToolContext{Client: newTestClient(ts.URL), Ctx: t.Context(), UserID: meID}
+	out, err := provider.toolReadChannel(mcpCtx, ReadChannelArgs{ChannelID: dm.Id})
+	require.NoError(t, err)
+	assert.Contains(t, out, "Channel: DM with @friend")
+	assert.Contains(t, out, "by me")
+}

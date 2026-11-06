@@ -20,6 +20,10 @@ type BaseConfig struct {
 	// For external servers: uses authenticated user's ID
 	// Default: true for embedded, true for HTTP, false for stdio
 	TrackAIGenerated *bool `json:"track_ai_generated,omitempty"`
+
+	// CompactOutput renders posts in tool results as a one-line header plus
+	// the message instead of one labeled line per field.
+	CompactOutput bool `json:"compact_output,omitempty"`
 }
 
 // GetMMServerURL returns the Mattermost server URL
@@ -39,6 +43,11 @@ func (c BaseConfig) GetMMInternalServerURL() string {
 // GetDevMode returns the development mode setting
 func (c BaseConfig) GetDevMode() bool {
 	return c.DevMode
+}
+
+// GetCompactOutput returns whether tool results use the compact post layout.
+func (c BaseConfig) GetCompactOutput() bool {
+	return c.CompactOutput
 }
 
 // GetTrackAIGenerated returns whether to track AI-generated content

@@ -97,6 +97,7 @@ type ServerConfig interface {
 	GetMMInternalServerURL() string
 	GetDevMode() bool
 	GetTrackAIGenerated() bool
+	GetCompactOutput() bool
 }
 
 // SemanticSearchService provides semantic search capabilities for the MCP server.
@@ -115,6 +116,7 @@ type MattermostToolProvider struct {
 	devMode                 bool
 	accessMode              AccessMode
 	trackAIGenerated        bool                  // Whether to add ai_generated_by props to posts
+	compactOutput           bool                  // Render posts in the compact layout
 	searchService           SemanticSearchService // Optional semantic search service, can be nil
 	fileContentService      FileContentService    // Optional file content service for read_file, can be nil
 	allowStateChangingTools func() bool           // Evaluated per request; nil fails closed
@@ -140,6 +142,7 @@ func NewMattermostToolProvider(authProvider auth.AuthenticationProvider, logger 
 		devMode:                 config.GetDevMode(),
 		accessMode:              accessMode,
 		trackAIGenerated:        config.GetTrackAIGenerated(),
+		compactOutput:           config.GetCompactOutput(),
 		searchService:           searchService,
 		fileContentService:      fileContentService,
 		allowStateChangingTools: allowStateChangingTools,

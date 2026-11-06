@@ -170,7 +170,7 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 	}
 
 	// Get channel info for context
-	channel, _, err := client.GetChannel(ctx, args.ChannelID)
+	channel, err := p.channel(ctx, client, mcpContext.UserID, args.ChannelID)
 	if err != nil {
 		return "", fmt.Errorf("error fetching channel: %w", err)
 	}
@@ -292,32 +292,23 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 		}
 	}
 
-	// Collect unique user IDs and fetch all at once
-	userIDs := make([]string, 0)
-	seen := make(map[string]bool)
+	// Resolve the authors, and the other participant of a direct message so
+	// the header names the conversation, in one request.
+	userIDs := make([]string, 0, len(filteredPosts)+1)
 	for _, post := range filteredPosts {
-		if !seen[post.UserId] {
-			seen[post.UserId] = true
-			userIDs = append(userIDs, post.UserId)
-		}
+		userIDs = append(userIDs, post.UserId)
 	}
-
-	userCache := make(map[string]string)
-	users, _, err := client.GetUsersByIds(ctx, userIDs)
-	if err != nil {
-		p.logger.Warn("failed to fetch users by IDs", "error", err)
-		for _, id := range userIDs {
-			userCache[id] = "Unknown User"
-		}
-	} else {
-		for _, user := range users {
-			userCache[user.Id] = user.Username
-		}
-		// Mark any IDs not returned as unknown
-		for _, id := range userIDs {
-			if _, exists := userCache[id]; !exists {
-				userCache[id] = "Unknown User"
-			}
+	dmOtherID := ""
+	if channel.Type == model.ChannelTypeDirect && mcpContext.UserID != "" {
+		dmOtherID = channel.GetOtherUserIdForDM(mcpContext.UserID)
+		userIDs = append(userIDs, dmOtherID)
+	}
+	userCache := p.usernamesByIDs(ctx, client, userIDs)
+	if channel.Type == model.ChannelTypeDirect && mcpContext.UserID != "" {
+		if dmOtherID == "" {
+			channelDisplayName = "DM with yourself"
+		} else if name := userCache[dmOtherID]; name != "Unknown User" {
+			channelDisplayName = "DM with @" + name
 		}
 	}
 
@@ -339,6 +330,7 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 			}
 		}
 		format.WritePost(&result, format.PostEntry{
+			Compact:         p.compactOutput,
 			HeaderLabel:     fmt.Sprintf("Post %d", i+1),
 			Username:        userCache[post.UserId],
 			ReplyAnnotation: replyAnnotation,

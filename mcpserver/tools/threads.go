@@ -290,6 +290,7 @@ func (p *MattermostToolProvider) formatMentions(mcpContext *MCPToolContext, post
 			status = "(you replied in thread)"
 		}
 		format.WritePost(&result, format.PostEntry{
+			Compact:         p.compactOutput,
 			HeaderLabel:     fmt.Sprintf("Mention %d", i+1),
 			Username:        usernames[post.UserId],
 			ReplyAnnotation: status,

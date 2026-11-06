@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/mattermost/mattermost-plugin-agents/v2/mcpserver"
 	loggerlib "github.com/mattermost/mattermost-plugin-agents/v2/mcpserver/logger"
@@ -26,6 +27,7 @@ var (
 	httpBindAddr        string
 	siteURL             string
 	trackAIGenerated    *bool // Pointer to distinguish unset from false
+	compactOutput       bool
 )
 
 func main() {
@@ -54,6 +56,8 @@ Authentication is handled via Personal Access Tokens (PAT).`,
 	rootCmd.Flags().StringVar(&httpBindAddr, "http-bind-addr", "127.0.0.1", "Bind address for HTTP server (defaults to localhost for security, use 0.0.0.0 for all interfaces)")
 	rootCmd.Flags().StringVar(&siteURL, "site-url", "", "External URL for OAuth and CORS (required when http-bind-addr is localhost or when using reverse proxy)")
 	rootCmd.Flags().Bool("stateless", false, "Enable stateless mode for multi-node/HA deployments (no server-side session tracking)")
+
+	rootCmd.Flags().BoolVar(&compactOutput, "compact", false, "Render posts in tool results as a one-line header plus the message (fewer tokens; or set MM_COMPACT_OUTPUT=true)")
 
 	// AI tracking flag
 	rootCmd.Flags().Bool("track-ai-generated", false, "Track AI-generated content in posts (default: false for stdio, true for http)")
@@ -91,6 +95,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	if mmInternalServerURL == "" {
 		mmInternalServerURL = os.Getenv("MM_INTERNAL_SERVER_URL")
+	}
+
+	if !cmd.Flags().Changed("compact") {
+		compactOutput, _ = strconv.ParseBool(os.Getenv("MM_COMPACT_OUTPUT"))
 	}
 
 	if token == "" && transport == "stdio" {
@@ -132,6 +140,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 			MMInternalServerURL: mmInternalServerURL,
 			DevMode:             devMode,
 			TrackAIGenerated:    trackAIGenerated,
+			CompactOutput:       compactOutput,
 			PersonalAccessToken: token,
 		}
 
@@ -144,6 +153,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 			MMInternalServerURL: mmInternalServerURL,
 			DevMode:             devMode,
 			TrackAIGenerated:    trackAIGenerated,
+			CompactOutput:       compactOutput,
 			HTTPPort:            httpPort,
 			HTTPBindAddr:        httpBindAddr,
 			SiteURL:             siteURL,

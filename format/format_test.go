@@ -850,3 +850,49 @@ func TestWriteDraft(t *testing.T) {
 	assert.Contains(t, out, "Last updated: 2023-11-14T22:13:20Z")
 	assert.Contains(t, out, "Message: draft hello")
 }
+
+func TestWritePostCompact(t *testing.T) {
+	post := &model.Post{
+		Id:        "postid",
+		ChannelId: "chanid",
+		RootId:    "rootid",
+		Message:   "first line\nsecond line",
+		CreateAt:  1773144000000, // 2026-03-10T12:00:00Z
+	}
+	filesOnly := &model.Post{Id: "fileid", FileIds: []string{"a", "b"}, CreateAt: 1773144000000}
+
+	tests := []struct {
+		name  string
+		entry PostEntry
+		want  string
+	}{
+		{
+			name:  "all fields",
+			entry: PostEntry{HeaderLabel: "Post 2", Username: "alice", Post: post, ChannelName: "Ops", TeamName: "Main", ShowChannel: true, Score: 0.5, ReplyAnnotation: "(reply to Post 1)", Compact: true},
+			want:  "[Post 2] 2026-03-10 12:00Z @alice id=postid root=rootid #Ops (Main) channel=chanid score=0.50 (reply to Post 1)\nfirst line\nsecond line\n\n",
+		},
+		{
+			name:  "minimal, unknown author",
+			entry: PostEntry{HeaderLabel: "Post 1", Post: &model.Post{Id: "p", Message: "hi"}, Compact: true},
+			want:  "[Post 1] @Unknown User id=p\nhi\n\n",
+		},
+		{
+			name:  "files without text get a placeholder",
+			entry: PostEntry{HeaderLabel: "Post 1", Username: "bob", Post: filesOnly, Compact: true},
+			want:  "[Post 1] 2026-03-10 12:00Z @bob id=fileid\n[2 file(s) attached]\n\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var b strings.Builder
+			WritePost(&b, tt.entry)
+			assert.Equal(t, tt.want, b.String())
+		})
+	}
+}
+
+func TestWritePostFilesOnlyPlaceholder(t *testing.T) {
+	var b strings.Builder
+	WritePost(&b, PostEntry{HeaderLabel: "Post 1", Username: "bob", Post: &model.Post{Id: "p", FileIds: []string{"a"}}})
+	assert.Contains(t, b.String(), "Message: [1 file(s) attached]")
+}

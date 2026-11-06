@@ -583,6 +583,7 @@ func (p *MattermostToolProvider) formatSingleResult(result *strings.Builder, ind
 		username = "@" + username
 	}
 	format.WritePost(result, format.PostEntry{
+		Compact:     p.compactOutput,
 		HeaderLabel: fmt.Sprintf("Result %d", index),
 		Username:    username,
 		Score:       score,
