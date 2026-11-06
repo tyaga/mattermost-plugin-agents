@@ -67,6 +67,7 @@ var expectedToolReadOnly = map[string]bool{
 	"add_channel_member":        false,
 	"get_user_channels":         true,
 	"get_active_channels":       true,
+	"read_channels":             true,
 	"get_channel_stats":         true,
 	"get_channel_member_counts": true,
 	"search_channels":           true,

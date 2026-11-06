@@ -598,3 +598,71 @@ func TestReadChannelNamesDirectMessage(t *testing.T) {
 	assert.Contains(t, out, "Channel: DM with @friend")
 	assert.Contains(t, out, "by me")
 }
+
+func TestToolReadChannels(t *testing.T) {
+	author := &model.User{Id: model.NewId(), Username: "alice"}
+	teamID := model.NewId()
+	readable := []*model.Channel{
+		{Id: model.NewId(), Type: model.ChannelTypeOpen, DisplayName: "Ops", TeamId: teamID},
+		{Id: model.NewId(), Type: model.ChannelTypeOpen, DisplayName: "Dev", TeamId: teamID},
+	}
+	forbidden := model.NewId()
+
+	mux := http.NewServeMux()
+	for _, ch := range readable {
+		mux.HandleFunc("/api/v4/channels/"+ch.Id, func(w http.ResponseWriter, _ *http.Request) {
+			writeTestJSON(w, ch)
+		})
+		mux.HandleFunc("/api/v4/channels/"+ch.Id+"/posts", func(w http.ResponseWriter, _ *http.Request) {
+			post := &model.Post{Id: model.NewId(), ChannelId: ch.Id, UserId: author.Id, Message: "hello from " + ch.DisplayName, CreateAt: 1000}
+			list := model.NewPostList()
+			list.AddPost(post)
+			list.AddOrder(post.Id)
+			writeTestJSON(w, list)
+		})
+	}
+	mux.HandleFunc("/api/v4/channels/"+forbidden, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"no access"}`, http.StatusForbidden)
+	})
+	mux.HandleFunc("/api/v4/teams/"+teamID, func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, &model.Team{Id: teamID, DisplayName: "Main"})
+	})
+	mux.HandleFunc("/api/v4/users/ids", usersByIDsHandler(t, []*model.User{author}))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	provider := newTestProvider(t, ts.URL)
+	mcpCtx := &MCPToolContext{Client: newTestClient(ts.URL), Ctx: t.Context(), UserID: model.NewId()}
+
+	tests := []struct {
+		name    string
+		ids     []string
+		want    []string
+		wantErr string
+	}{
+		{
+			name: "reads each channel in order and reports per-channel errors",
+			ids:  []string{readable[0].Id, forbidden, readable[1].Id},
+			want: []string{"=== Channel 1 of 3", "hello from Ops", "=== Channel 2 of 3", "Error: error fetching channel", "=== Channel 3 of 3", "hello from Dev"},
+		},
+		{name: "rejects an empty list", ids: nil, wantErr: "cannot be empty"},
+		{name: "rejects malformed IDs", ids: []string{"bad"}, wantErr: "valid ID"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := provider.toolReadChannels(mcpCtx, ReadChannelsArgs{ChannelIDs: tt.ids})
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			last := -1
+			for _, want := range tt.want {
+				idx := strings.Index(out, want)
+				assert.Greater(t, idx, last, "%q missing or out of order", want)
+				last = idx
+			}
+		})
+	}
+}

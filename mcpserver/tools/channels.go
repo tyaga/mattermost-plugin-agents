@@ -70,6 +70,21 @@ type GetUserChannelsArgs struct {
 	PerPage int    `json:"per_page,omitempty" jsonschema:"Number of channels per page (default: 60, max: 200),minimum=1,maximum=200"`
 }
 
+// ReadChannelsArgs represents arguments for the read_channels tool
+type ReadChannelsArgs struct {
+	ChannelIDs []string `json:"channel_ids" jsonschema:"IDs of the channels to read (1-20),minItems=1,maxItems=20"`
+	Since      string   `json:"since,omitempty" jsonschema:"Only posts at or after this time (ISO 8601 / RFC3339),format=date-time"`
+	From       string   `json:"from,omitempty" jsonschema:"Only posts written by this username,maxLength=64"`
+	Limit      int      `json:"limit,omitempty" jsonschema:"Posts per channel (default: 20, max: 100),minimum=1,maximum=100"`
+}
+
+// readChannelsMaxChannels and readChannelsMaxLimit bound one read_channels
+// call so its result stays a size a model can use.
+const (
+	readChannelsMaxChannels = 20
+	readChannelsMaxLimit    = 100
+)
+
 // GetActiveChannelsArgs represents arguments for the get_active_channels tool
 type GetActiveChannelsArgs struct {
 	Since         string   `json:"since" jsonschema:"Only return channels whose last post is at or after this time (ISO 8601 / RFC3339 timestamp),format=date-time"`
@@ -92,6 +107,8 @@ const (
 
 	getUserChannelsDescription = "Get channels the current user is a member of, including DMs and GMs. Parameters: team_id (optional, filter by team), page (default 0), per_page (1-200, default 60). Returns channel details with team info and pagination. Example: {\"team_id\": \"w1jkn9ebkiby7qezqfxk7o5ney\", \"per_page\": 60}"
 
+	readChannelsDescription = "Read several channels in one call, e.g. every channel get_active_channels returned. Each channel is read like read_channel (same since/from semantics) and the results are concatenated; a channel that cannot be read shows its error without failing the others. Parameters: channel_ids (required, 1-20), since (optional ISO 8601), from (optional username), limit (posts per channel, 1-100, default 20). Example: {\"channel_ids\": [\"h5wqm8kxptbztfgzpaxbsqozah\", \"8xqzn3pfmtbyfkr9hqbw4hheoa\"], \"since\": \"2024-01-01T00:00:00Z\"}"
+
 	getActiveChannelsDescription = "Get channels with recent activity: channels the current user is a member of (including DMs and GMs) whose last post is at or after the given time, sorted newest first. DM rows show the other participant's username. Use this to answer questions like 'who wrote to me today' or 'what happened while I was away' — first call this, then read_channel only the channels it returns, instead of reading every channel. With with_last_post each row also shows who wrote last and what; with awaiting_reply only channels where the last post is from someone else (not you, not a bot) are kept — one call answers 'which conversations am I yet to reply to'. Parameters: since (required, ISO 8601), team_id (optional), channel_types (optional list of 'O' public, 'P' private, 'D' direct, 'G' group), limit (1-200, default 60), with_last_post, awaiting_reply. Example: {\"since\": \"2024-01-01T00:00:00Z\", \"channel_types\": [\"D\", \"G\"], \"awaiting_reply\": true}"
 )
 
@@ -105,6 +122,7 @@ func (p *MattermostToolProvider) getChannelTools() []MCPTool {
 		mcpTool(p, "add_channel_member", "Add a user to a channel (channel membership). Parameters: user_id (required), channel_id (required). Returns confirmation message.", p.toolAddChannelMember),
 		mcpReadTool(p, "get_user_channels", getUserChannelsDescription, p.toolGetUserChannels),
 		mcpReadTool(p, "get_active_channels", getActiveChannelsDescription, p.toolGetActiveChannels),
+		mcpReadTool(p, "read_channels", readChannelsDescription, p.toolReadChannels),
 		mcpReadTool(p, "get_channel_stats", getChannelStatsDescription, p.toolGetChannelStats),
 		mcpReadTool(p, "get_channel_member_counts", getChannelMemberCountsDescription, p.toolGetChannelMemberCounts),
 		mcpReadTool(p, "search_channels", searchChannelsDescription, p.toolSearchChannels),
@@ -1007,6 +1025,47 @@ func (p *MattermostToolProvider) lastPostsWithAuthors(ctx context.Context, clien
 		}
 	}
 	return posts, p.usersByIDs(ctx, client, authorIDs)
+}
+
+// toolReadChannels implements the read_channels tool by running read_channel
+// for each channel, a few at a time, and joining the results in input order.
+func (p *MattermostToolProvider) toolReadChannels(mcpContext *MCPToolContext, args ReadChannelsArgs) (string, error) {
+	if len(args.ChannelIDs) == 0 {
+		return "", fmt.Errorf("channel_ids cannot be empty")
+	}
+	if len(args.ChannelIDs) > readChannelsMaxChannels {
+		return "", fmt.Errorf("at most %d channel_ids per call, got %d", readChannelsMaxChannels, len(args.ChannelIDs))
+	}
+	if err := requireIDs("channel_ids", args.ChannelIDs); err != nil {
+		return "", err
+	}
+	if args.Limit <= 0 {
+		args.Limit = 20
+	}
+	if args.Limit > readChannelsMaxLimit {
+		args.Limit = readChannelsMaxLimit
+	}
+
+	outputs := make([]string, len(args.ChannelIDs))
+	forEachParallel(len(args.ChannelIDs), func(i int) {
+		out, err := p.toolReadChannel(mcpContext, ReadChannelArgs{
+			ChannelID: args.ChannelIDs[i],
+			Since:     args.Since,
+			From:      args.From,
+			Limit:     args.Limit,
+		})
+		if err != nil {
+			out = "Error: " + err.Error()
+		}
+		outputs[i] = out
+	})
+
+	var result strings.Builder
+	for i, out := range outputs {
+		fmt.Fprintf(&result, "=== Channel %d of %d (ID: %s) ===\n%s\n", i+1, len(outputs), args.ChannelIDs[i], strings.TrimRight(out, "\n"))
+		result.WriteString("\n")
+	}
+	return result.String(), nil
 }
 
 // toolGetActiveChannels implements the get_active_channels tool.
