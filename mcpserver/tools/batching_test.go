@@ -406,3 +406,56 @@ func TestKeywordSearchPagesPastDefault(t *testing.T) {
 		})
 	}
 }
+
+func TestReadPostThreadLimit(t *testing.T) {
+	channelID := model.NewId()
+	author := &model.User{Id: model.NewId(), Username: "alice"}
+	thread := make([]*model.Post, 10)
+	for i := range thread {
+		thread[i] = &model.Post{Id: model.NewId(), ChannelId: channelID, UserId: author.Id, Message: fmt.Sprintf("msg-%02d", i+1), CreateAt: int64(1000 + i)}
+		if i > 0 {
+			thread[i].RootId = thread[0].Id
+		}
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/posts/"+thread[0].Id+"/thread", func(w http.ResponseWriter, _ *http.Request) {
+		list := model.NewPostList()
+		for _, post := range thread {
+			list.AddPost(post)
+			list.AddOrder(post.Id)
+		}
+		writeTestJSON(w, list)
+	})
+	mux.HandleFunc("/api/v4/users/ids", usersByIDsHandler(t, []*model.User{author}))
+	mux.HandleFunc("/api/v4/channels/"+channelID, func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, &model.Channel{Id: channelID, DisplayName: "Ops", Type: model.ChannelTypeOpen})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	p := newTestProvider(t, ts.URL)
+	mcpCtx := &MCPToolContext{Ctx: t.Context(), Client: newTestClient(ts.URL), UserID: model.NewId()}
+
+	tests := []struct {
+		name    string
+		limit   int
+		want    []string
+		notWant []string
+	}{
+		{"whole thread under the limit", 20, []string{"Thread with 10 posts", "msg-01", "msg-05", "msg-10"}, []string{"skipped"}},
+		{"root plus latest replies", 4, []string{"Thread with 10 posts", "msg-01", "posts 2-7 of 10 skipped", "**Post 8**", "msg-08", "msg-10"}, []string{"msg-07", "msg-02"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := p.toolReadPost(mcpCtx, ReadPostArgs{PostID: thread[0].Id, Limit: tt.limit})
+			require.NoError(t, err)
+			for _, want := range tt.want {
+				assert.Contains(t, out, want)
+			}
+			for _, notWant := range tt.notWant {
+				assert.NotContains(t, out, notWant)
+			}
+		})
+	}
+}

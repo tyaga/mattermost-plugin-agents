@@ -18,7 +18,15 @@ import (
 type ReadPostArgs struct {
 	PostID        string `json:"post_id" jsonschema:"The ID of the post to read,minLength=26,maxLength=26"`
 	IncludeThread *bool  `json:"include_thread,omitempty" jsonschema:"Whether to include the entire thread (default: true). Set false to fetch only the single post."`
+	Limit         int    `json:"limit,omitempty" jsonschema:"Maximum thread posts to show: the root plus the latest replies (default: 50, max: 500),minimum=1,maximum=500"`
 }
+
+// Thread size bounds for read_post: long threads are shown as their root
+// and latest replies, which is what a reader usually needs.
+const (
+	readPostDefaultLimit = 50
+	readPostMaxLimit     = 500
+)
 
 // CreatePostArgs represents arguments for the create_post tool
 type CreatePostArgs struct {
@@ -62,7 +70,7 @@ type GroupMessageArgs struct {
 // descriptions are format strings: getPostTools fills the %s with an access-mode-dependent
 // attachments clause.
 const (
-	readPostDescription = "Read a specific post and its thread from Mattermost. Parameters: post_id (required), include_thread (boolean, default true). Returns post content, author info, and optionally all replies in the thread. Example: {\"post_id\": \"8xqzn3pfmtbyfkr9hqbw4hheoa\", \"include_thread\": true}"
+	readPostDescription = "Read a specific post and its thread from Mattermost. Parameters: post_id (required), include_thread (boolean, default true), limit (1-500, default 50: long threads show the root and the latest replies). Returns post content, author info, and optionally the replies in the thread. Example: {\"post_id\": \"8xqzn3pfmtbyfkr9hqbw4hheoa\", \"include_thread\": true}"
 
 	createPostDescriptionFmt = "Create a new post in Mattermost. IMPORTANT WORKFLOW: You MUST first call get_channel_info to obtain the channel_id, channel_display_name, and team_display_name (team_display_name only applies to public and private channels; omit it for direct and group message channels, which have no team). Present this context to the user before posting. Then call this tool with all required parameters. This ensures full transparency about where the message will be posted. Parameters: channel_id (required), channel_display_name (required), team_display_name (required unless the channel is a direct or group message), message (required), root_id (optional - for replies), files (optional: create and attach text files inline by providing name + content; the extension sets the file type; max 10)%s. Returns created post details including ID and timestamp. Example: {\"channel_id\": \"h5wqm8kxptbztfgzpaxbsqozah\", \"message\": \"Hello team!\"}"
 
@@ -155,12 +163,33 @@ func (p *MattermostToolProvider) toolReadPost(mcpContext *MCPToolContext, args R
 		return "no posts found", nil
 	}
 
+	if args.Limit <= 0 {
+		args.Limit = readPostDefaultLimit
+	}
+	if args.Limit > readPostMaxLimit {
+		args.Limit = readPostMaxLimit
+	}
+	threadSize := len(posts)
+	// shown holds the 0-based thread positions printed: the root, then the
+	// latest replies. Labels keep thread positions so "Post N" stays stable.
+	shown := make([]int, 0, min(threadSize, args.Limit))
+	if threadSize <= args.Limit {
+		for i := range posts {
+			shown = append(shown, i)
+		}
+	} else {
+		shown = append(shown, 0)
+		for i := threadSize - (args.Limit - 1); i < threadSize; i++ {
+			shown = append(shown, i)
+		}
+	}
+
 	// Channel and team context (from the first post's channel) and the authors
 	// are independent lookups; run them side by side.
 	var channelName, teamName string
-	userIDs := make([]string, len(posts))
-	for i, post := range posts {
-		userIDs[i] = post.UserId
+	userIDs := make([]string, len(shown))
+	for i, idx := range shown {
+		userIDs[i] = posts[idx].UserId
 	}
 	var usernames map[string]string
 	var wg sync.WaitGroup
@@ -202,11 +231,16 @@ func (p *MattermostToolProvider) toolReadPost(mcpContext *MCPToolContext, args R
 	}
 	result.WriteString("\n")
 
-	if includeThread && len(posts) > 1 {
-		fmt.Fprintf(&result, "Thread with %d posts:\n\n", len(posts))
+	if includeThread && threadSize > 1 {
+		fmt.Fprintf(&result, "Thread with %d posts:\n\n", threadSize)
 	}
 
-	for i, post := range posts {
+	for n, i := range shown {
+		post := posts[i]
+		if n == 1 && i > 1 {
+			fmt.Fprintf(&result, "... posts 2-%d of %d skipped; showing the root and the latest %d. Raise limit (max %d) to see more.\n\n",
+				i, threadSize, len(shown)-1, readPostMaxLimit)
+		}
 		format.WritePost(&result, format.PostEntry{
 			Compact:     p.compactOutput,
 			HeaderLabel: fmt.Sprintf("Post %d", i+1),
