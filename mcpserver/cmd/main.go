@@ -16,7 +16,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "0.1.0"
+// version is set at build time: -ldflags "-X main.version=1.2.3".
+var version = "dev"
 
 var (
 	mmServerURL         string
@@ -36,6 +37,7 @@ var (
 	toolNames           []string
 	accessMode          string
 	disableSemantic     bool
+	disabledToolParams  []string
 )
 
 func main() {
@@ -79,6 +81,8 @@ Authentication is handled via Personal Access Tokens (PAT).`,
 	rootCmd.Flags().StringVar(&accessMode, "access-mode", "local", "stdio only: 'local' lets tools read local files for attachments and uploads, 'remote' disables local file access (or set MM_ACCESS_MODE)")
 	rootCmd.Flags().BoolVar(&disableSemantic, "disable-semantic-search", false, "Use keyword search only, for servers without semantic search in the Agents plugin (or set MM_DISABLE_SEMANTIC_SEARCH=true)")
 
+	rootCmd.Flags().StringSliceVar(&disabledToolParams, "disable-tool-params", nil, "Comma-separated tool.param entries to drop from tool schemas and refuse in calls, e.g. read_channel.from (or set MM_DISABLE_TOOL_PARAMS)")
+
 	// AI tracking flag
 	rootCmd.Flags().Bool("track-ai-generated", false, "Track AI-generated content in posts (default: false for stdio, true for http)")
 
@@ -105,11 +109,6 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// Check for environment variables if flags not provided
 	if mmServerURL == "" {
 		mmServerURL = os.Getenv("MM_SERVER_URL")
-		if mmServerURL == "" {
-			logger.Error("server URL is required (use --server-url or MM_SERVER_URL environment variable)")
-			logger.Flush()
-			return fmt.Errorf("server URL is required")
-		}
 	}
 
 	if mmInternalServerURL == "" {
@@ -152,10 +151,31 @@ func runServer(cmd *cobra.Command, args []string) error {
 		disableSemantic, _ = strconv.ParseBool(os.Getenv("MM_DISABLE_SEMANTIC_SEARCH"))
 	}
 
+	if !cmd.Flags().Changed("disable-tool-params") {
+		if env := os.Getenv("MM_DISABLE_TOOL_PARAMS"); env != "" {
+			disabledToolParams = strings.Split(env, ",")
+		}
+	}
+	for i, entry := range disabledToolParams {
+		disabledToolParams[i] = strings.TrimSpace(entry)
+	}
+
 	if lockErr := applyLockedSettings(cmd); lockErr != nil {
 		logger.Error("setting fixed at build time", "error", lockErr)
 		logger.Flush()
 		return lockErr
+	}
+
+	if mmServerURL == "" {
+		logger.Error("server URL is required (use --server-url or MM_SERVER_URL environment variable)")
+		logger.Flush()
+		return fmt.Errorf("server URL is required")
+	}
+
+	if paramsErr := tools.ValidateDisabledToolParams(disabledToolParams); paramsErr != nil {
+		logger.Error("invalid disabled tool parameter", "error", paramsErr)
+		logger.Flush()
+		return paramsErr
 	}
 
 	knownTools := tools.AllToolNames()
@@ -215,6 +235,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 			ReadOnlyTools:         readOnlyTools,
 			ToolNames:             toolNames,
 			DisableSemanticSearch: disableSemantic,
+			DisabledToolParams:    disabledToolParams,
 			PersonalAccessToken:   token,
 			AccessMode:            accessMode,
 		}
@@ -233,6 +254,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 			ReadOnlyTools:         readOnlyTools,
 			ToolNames:             toolNames,
 			DisableSemanticSearch: disableSemantic,
+			DisabledToolParams:    disabledToolParams,
 			HTTPPort:              httpPort,
 			HTTPBindAddr:          httpBindAddr,
 			SiteURL:               siteURL,

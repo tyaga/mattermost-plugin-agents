@@ -17,7 +17,9 @@ import (
 // users must not widen:
 //
 //	go build -ldflags "-X main.lockedToolNames=read_channel,dm -X main.lockedAccessMode=remote \
-//	    -X main.lockedDisableSemanticSearch=true -X main.lockedTrackAIGenerated=true"
+//	    -X main.lockedDisableSemanticSearch=true -X main.lockedTrackAIGenerated=true \
+//	    -X main.lockedDisableToolParams=read_channel.from \
+//	    -X main.lockedServerURL=https://mattermost.example.com -X main.lockedTransport=stdio"
 //
 // A set value overrides its flag and environment variable. A different value
 // passed at startup stops the server instead of being silently ignored.
@@ -26,6 +28,11 @@ var (
 	lockedAccessMode            string
 	lockedDisableSemanticSearch string
 	lockedTrackAIGenerated      string
+	lockedDisableToolParams     string
+	// lockedServerURL is the only server the access token is sent to: it also
+	// rules out a different internal server URL.
+	lockedServerURL string
+	lockedTransport string
 )
 
 // providedAtStartup reports whether the user set a flag or its environment
@@ -100,7 +107,36 @@ func applyLockedSettings(cmd *cobra.Command) error {
 		}
 		trackAIGenerated = &want
 	}
+
+	if lockedDisableToolParams != "" {
+		want := splitToolNames(lockedDisableToolParams)
+		if providedAtStartup(cmd, "disable-tool-params", "MM_DISABLE_TOOL_PARAMS") && !sameToolNames(disabledToolParams, want) {
+			return lockedError("disable-tool-params", "MM_DISABLE_TOOL_PARAMS", lockedDisableToolParams)
+		}
+		disabledToolParams = want
+	}
+
+	if lockedServerURL != "" {
+		if mmServerURL != "" && !sameURL(mmServerURL, lockedServerURL) {
+			return lockedError("server-url", "MM_SERVER_URL", lockedServerURL)
+		}
+		if mmInternalServerURL != "" && !sameURL(mmInternalServerURL, lockedServerURL) {
+			return lockedError("internal-server-url", "MM_INTERNAL_SERVER_URL", lockedServerURL)
+		}
+		mmServerURL = lockedServerURL
+		mmInternalServerURL = ""
+	}
+
+	if lockedTransport != "" {
+		if transport != lockedTransport {
+			return lockedError("transport", "", lockedTransport)
+		}
+	}
 	return nil
+}
+
+func sameURL(a, b string) bool {
+	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
 }
 
 // describeLockedSettings marks locked flags in --help.
@@ -110,6 +146,10 @@ func describeLockedSettings(cmd *cobra.Command) {
 		"access-mode":             lockedAccessMode,
 		"disable-semantic-search": lockedDisableSemanticSearch,
 		"track-ai-generated":      lockedTrackAIGenerated,
+		"disable-tool-params":     lockedDisableToolParams,
+		"server-url":              lockedServerURL,
+		"internal-server-url":     lockedServerURL,
+		"transport":               lockedTransport,
 	} {
 		if f := cmd.Flags().Lookup(flag); f != nil && value != "" {
 			f.Usage += fmt.Sprintf(" [fixed in this build: %s]", value)

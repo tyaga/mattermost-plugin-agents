@@ -231,21 +231,9 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 	var windowPosts []*model.Post
 	windowComplete := true
 	if since > 0 {
-		posts, _, sinceErr := client.GetPostsSince(ctx, args.ChannelID, since, false)
-		if sinceErr != nil {
-			return "", fmt.Errorf("error fetching posts: %w", sinceErr)
-		}
-		// The since endpoint also returns older posts edited after the
-		// timestamp; keep only posts created inside the window.
-		for _, post := range posts.ToSlice() {
-			if post.CreateAt >= since {
-				windowPosts = append(windowPosts, post)
-			}
-		}
-		// The since endpoint takes no page size and the server caps its result,
-		// so a window at the cap may extend past what was returned.
-		if len(posts.Order) >= sincePostsServerCap {
-			windowComplete = false
+		windowPosts, windowComplete, err = fetchPostsSince(ctx, client, args.ChannelID, since)
+		if err != nil {
+			return "", err
 		}
 	} else {
 		windowPosts, err = p.fetchPostsPaged(mcpContext, args)
@@ -274,9 +262,14 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 
 	if len(filteredPosts) == 0 {
 		if fromUserID != "" {
+			if since == 0 {
+				// Without since only one page was read, which says nothing
+				// about the rest of the channel.
+				return fmt.Sprintf("no posts by @%s among the %d posts on this page; this does not cover the rest of the channel — use since to check a timeframe", fromUsername, scanned), nil
+			}
 			verdict := fmt.Sprintf("no posts by @%s among the %d posts in the specified timeframe", fromUsername, scanned)
 			if !windowComplete {
-				verdict += fmt.Sprintf(" — but the window exceeds the %d-post server cap, so it was only partially scanned; narrow the timeframe to be certain", sincePostsServerCap)
+				verdict += fmt.Sprintf(" — but the window holds more than %d posts, so it was only partially scanned; narrow the timeframe to be certain", sincePostsServerCap)
 			}
 			return verdict, nil
 		}
@@ -292,14 +285,18 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 	}
 	if since > 0 && (matched > args.Limit || !windowComplete) {
 		lastShown := filteredPosts[len(filteredPosts)-1]
-		continueHint := fmt.Sprintf("To continue, call read_channel with after=%q or since=%q.",
-			lastShown.Id, time.UnixMilli(lastShown.CreateAt).UTC().Format(time.RFC3339))
+		continueHint := fmt.Sprintf("To continue, call read_channel with since=%q.",
+			time.UnixMilli(lastShown.CreateAt).UTC().Format(time.RFC3339))
+		if !p.paramDisabled("read_channel", "after") {
+			continueHint = fmt.Sprintf("To continue, call read_channel with after=%q or since=%q.",
+				lastShown.Id, time.UnixMilli(lastShown.CreateAt).UTC().Format(time.RFC3339))
+		}
 		switch {
 		case !windowComplete:
 			truncationNote = fmt.Sprintf(
-				"\nThis window holds more posts than the server returns in one request (cap: %d), so it was scanned only up to %s. Showing %d post(s) from that part. %s\n",
+				"\nThis window holds more posts than one call scans (%d): posts before %s were not read. Showing %d post(s) from the scanned part. %s\n",
 				sincePostsServerCap,
-				time.UnixMilli(windowPosts[len(windowPosts)-1].CreateAt).UTC().Format(time.RFC3339),
+				time.UnixMilli(windowPosts[0].CreateAt).UTC().Format(time.RFC3339),
 				len(filteredPosts), continueHint,
 			)
 		default:
@@ -360,6 +357,52 @@ func (p *MattermostToolProvider) toolReadChannel(mcpContext *MCPToolContext, arg
 	result.WriteString(truncationNote)
 
 	return result.String(), nil
+}
+
+// fetchPostsSince returns the live posts created in a channel since the
+// timestamp (milliseconds) and whether that is the whole window.
+func fetchPostsSince(ctx context.Context, client *model.Client4, channelID string, since int64) ([]*model.Post, bool, error) {
+	posts, _, err := client.GetPostsSince(ctx, channelID, since, false)
+	if err != nil {
+		return nil, false, fmt.Errorf("error fetching posts: %w", err)
+	}
+	if len(posts.Order) < sincePostsServerCap {
+		// The since endpoint also returns posts deleted after the timestamp
+		// (with their text blanked) and older posts edited after it.
+		var window []*model.Post
+		for _, post := range posts.ToSlice() {
+			if post.DeleteAt == 0 && post.CreateAt >= since {
+				window = append(window, post)
+			}
+		}
+		return window, true, nil
+	}
+
+	// At its cap the since endpoint returns an arbitrary part of the window, so
+	// a cursor into it could skip posts. Page back from the newest post
+	// instead: those pages are ordered and hold no deleted posts.
+	const perPage = 200
+	seen := map[string]bool{}
+	var window []*model.Post
+	for page := range sincePostsServerCap / perPage {
+		chunk, _, pageErr := client.GetPostsForChannel(ctx, channelID, page, perPage, "", false, false)
+		if pageErr != nil {
+			return nil, false, fmt.Errorf("error fetching posts (page %d): %w", page, pageErr)
+		}
+		for _, post := range chunk.ToSlice() {
+			if post.CreateAt < since {
+				return window, true, nil
+			}
+			if !seen[post.Id] {
+				seen[post.Id] = true
+				window = append(window, post)
+			}
+		}
+		if len(chunk.Order) < perPage {
+			return window, true, nil
+		}
+	}
+	return window, false, nil
 }
 
 // fetchPostsPaged retrieves posts for read_channel's offset-based modes
@@ -734,7 +777,6 @@ func (p *MattermostToolProvider) tryFindChannelByDisplayName(mcpContext *MCPTool
 	ctx := mcpContext.Ctx
 	client := mcpContext.Client
 	if teamID != "" {
-		// Search within specific team - should only return one result
 		userID, userErr := p.resolveUserID(mcpContext)
 		if userErr != nil {
 			return nil, userErr
@@ -745,14 +787,23 @@ func (p *MattermostToolProvider) tryFindChannelByDisplayName(mcpContext *MCPTool
 			return nil, fmt.Errorf("error fetching team channels: %w", channelErr)
 		}
 
+		// Names differing only in emoji, case or spacing all match, so a
+		// literal match wins and anything else is returned for the caller
+		// to choose from.
+		matches := []*model.Channel{}
+		var literal []*model.Channel
 		for _, ch := range channels {
 			if displayNamesMatch(displayName, ch.DisplayName) {
-				return []*model.Channel{ch}, nil
+				matches = append(matches, ch)
+				if ch.DisplayName == displayName {
+					literal = append(literal, ch)
+				}
 			}
 		}
-
-		// Not found in team - return empty slice with nil error (not a technical failure)
-		return []*model.Channel{}, nil
+		if len(literal) == 1 {
+			return literal, nil
+		}
+		return matches, nil
 	}
 
 	// Search across all teams

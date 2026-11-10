@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -422,17 +423,28 @@ func TestToolReadChannelServerCapHonesty(t *testing.T) {
 	const sinceMillis = int64(1_700_000_000_000)
 	sinceISO := time.UnixMilli(sinceMillis).UTC().Format(time.RFC3339)
 
-	// A window at the server cap: the API cannot say whether more follows.
+	// A window at the server cap: the since endpoint returned an arbitrary
+	// part of it, and every page read back from the newest post is still
+	// inside the window.
 	capped := buildPostList(channelID, userID, sincePostsServerCap, sinceMillis)
+	const perPage = 200
+	pageStart := func(page int) int64 {
+		return sinceMillis + int64(sincePostsServerCap/perPage-page)*1_000_000
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(fmt.Sprintf("/api/v4/channels/%s", channelID), func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(&model.Channel{Id: channelID, Type: model.ChannelTypeOpen, DisplayName: "Firehose"})
 	})
-	mux.HandleFunc(fmt.Sprintf("/api/v4/channels/%s/posts", channelID), func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(fmt.Sprintf("/api/v4/channels/%s/posts", channelID), func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(capped)
+		if r.URL.Query().Get("since") != "" {
+			_ = json.NewEncoder(w).Encode(capped)
+			return
+		}
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		_ = json.NewEncoder(w).Encode(buildPostList(channelID, userID, perPage, pageStart(page)))
 	})
 	mux.HandleFunc("/api/v4/users/username/absent.user", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -451,8 +463,9 @@ func TestToolReadChannelServerCapHonesty(t *testing.T) {
 	t.Run("admits the window was only partially scanned", func(t *testing.T) {
 		out, err := provider.toolReadChannel(mcpCtx, ReadChannelArgs{ChannelID: channelID, Since: sinceISO, Limit: 10})
 		require.NoError(t, err)
-		assert.Contains(t, out, "more posts than the server returns in one request")
-		assert.Contains(t, out, fmt.Sprintf("cap: %d", sincePostsServerCap))
+		assert.Contains(t, out, fmt.Sprintf("more posts than one call scans (%d)", sincePostsServerCap))
+		// The scanned part starts at the oldest post of the last page read.
+		assert.Contains(t, out, "posts before "+time.UnixMilli(pageStart(sincePostsServerCap/perPage-1)).UTC().Format(time.RFC3339)+" were not read")
 		assert.Contains(t, out, "To continue, call read_channel with after=")
 		// The old wording claimed an exact total; it must not come back.
 		assert.NotContains(t, out, fmt.Sprintf("of %d matching posts", sincePostsServerCap))
@@ -716,6 +729,154 @@ func TestGetChannelInfoIgnoresEmojiAndMatchesPartially(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out, err := provider.toolGetChannelInfo(mcpCtx, tt.args)
+			require.NoError(t, err)
+			for _, want := range tt.want {
+				assert.Contains(t, out, want)
+			}
+			for _, notWant := range tt.notWant {
+				assert.NotContains(t, out, notWant)
+			}
+		})
+	}
+}
+
+// The since endpoint reports deleted posts with their text blanked, and at its
+// cap returns an unordered part of the window; read_channel shows neither.
+func TestToolReadChannelSinceSkipsDeletedAndReadsOrderedWindow(t *testing.T) {
+	userID := model.NewId()
+	const sinceMillis = int64(1_700_000_000_000)
+	sinceISO := time.UnixMilli(sinceMillis).UTC().Format(time.RFC3339)
+
+	tests := []struct {
+		name      string
+		sincePart func(channelID string) *model.PostList
+		paged     func(channelID string) *model.PostList
+		want      []string
+		notWant   []string
+	}{
+		{
+			name: "deleted posts are left out",
+			sincePart: func(channelID string) *model.PostList {
+				list := buildPostList(channelID, userID, 3, sinceMillis)
+				list.Posts[list.Order[0]].DeleteAt = sinceMillis + 5000
+				list.Posts[list.Order[0]].Message = ""
+				return list
+			},
+			want:    []string{"Found 2 posts", "msg-0", "msg-1"},
+			notWant: []string{"Post 3"},
+		},
+		{
+			name: "a window at the since cap is read from ordered pages",
+			sincePart: func(channelID string) *model.PostList {
+				return buildPostList(channelID, userID, sincePostsServerCap, sinceMillis)
+			},
+			paged: func(channelID string) *model.PostList {
+				// Two posts inside the window, one before it.
+				return buildPostList(channelID, userID, 3, sinceMillis-1000)
+			},
+			want:    []string{"Found 2 posts", "msg-1", "msg-2"},
+			notWant: []string{"msg-0", "were not read"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			channelID := model.NewId()
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v4/channels/"+channelID, func(w http.ResponseWriter, _ *http.Request) {
+				writeTestJSON(w, &model.Channel{Id: channelID, Type: model.ChannelTypeOpen, DisplayName: "Town"})
+			})
+			mux.HandleFunc(fmt.Sprintf("/api/v4/channels/%s/posts", channelID), func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("since") != "" {
+					writeTestJSON(w, tt.sincePart(channelID))
+					return
+				}
+				writeTestJSON(w, tt.paged(channelID))
+			})
+			mux.HandleFunc("/api/v4/users/ids", func(w http.ResponseWriter, _ *http.Request) {
+				writeTestJSON(w, []*model.User{{Id: userID, Username: "chatty"}})
+			})
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
+
+			provider := newTestProvider(t, ts.URL)
+			mcpCtx := &MCPToolContext{Client: newTestClient(ts.URL), Ctx: t.Context()}
+			out, err := provider.toolReadChannel(mcpCtx, ReadChannelArgs{ChannelID: channelID, Since: sinceISO, Limit: 50})
+			require.NoError(t, err)
+			for _, want := range tt.want {
+				assert.Contains(t, out, want)
+			}
+			for _, notWant := range tt.notWant {
+				assert.NotContains(t, out, notWant)
+			}
+		})
+	}
+}
+
+// Without since, from filters a single page: a miss there is not "did not post".
+func TestToolReadChannelFromOnOnePageIsNotAbsence(t *testing.T) {
+	channelID := model.NewId()
+	userID := model.NewId()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/channels/"+channelID, func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, &model.Channel{Id: channelID, Type: model.ChannelTypeOpen, DisplayName: "Town"})
+	})
+	mux.HandleFunc(fmt.Sprintf("/api/v4/channels/%s/posts", channelID), func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, buildPostList(channelID, userID, 5, 1_700_000_000_000))
+	})
+	mux.HandleFunc("/api/v4/users/username/absent.user", func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, &model.User{Id: model.NewId(), Username: "absent.user"})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	provider := newTestProvider(t, ts.URL)
+	mcpCtx := &MCPToolContext{Client: newTestClient(ts.URL), Ctx: t.Context()}
+	out, err := provider.toolReadChannel(mcpCtx, ReadChannelArgs{ChannelID: channelID, From: "absent.user", Limit: 5})
+	require.NoError(t, err)
+	assert.Contains(t, out, "among the 5 posts on this page")
+	assert.Contains(t, out, "does not cover the rest of the channel")
+}
+
+// Display names that differ only in emoji match the same query; the tool must
+// not pick one of them silently.
+func TestGetChannelInfoAmbiguousNamesInTeam(t *testing.T) {
+	meID := model.NewId()
+	teamID := model.NewId()
+	red := &model.Channel{Id: model.NewId(), TeamId: teamID, Type: model.ChannelTypeOpen, Name: "alerts-prod", DisplayName: "🔴 Alerts"}
+	green := &model.Channel{Id: model.NewId(), TeamId: teamID, Type: model.ChannelTypeOpen, Name: "alerts-test", DisplayName: "🟢 Alerts"}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(fmt.Sprintf("/api/v4/users/%s/teams/%s/channels", meID, teamID), func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, []*model.Channel{red, green})
+	})
+	mux.HandleFunc("/api/v4/teams/"+teamID, func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, &model.Team{Id: teamID, DisplayName: "Main"})
+	})
+	mux.HandleFunc("/api/v4/channels/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/stats") {
+			writeTestJSON(w, &model.ChannelStats{MemberCount: 3})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	provider := newTestProvider(t, ts.URL)
+	mcpCtx := &MCPToolContext{Client: newTestClient(ts.URL), Ctx: t.Context(), UserID: meID}
+
+	tests := []struct {
+		name    string
+		query   string
+		want    []string
+		notWant []string
+	}{
+		{"a name matching both lists both", "Alerts", []string{"Found 2 channels", red.Id, green.Id}, nil},
+		{"the literal display name picks its channel", "🟢 Alerts", []string{green.Id}, []string{red.Id}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := provider.toolGetChannelInfo(mcpCtx, GetChannelInfoArgs{ChannelName: tt.query, TeamID: teamID})
 			require.NoError(t, err)
 			for _, want := range tt.want {
 				assert.Contains(t, out, want)

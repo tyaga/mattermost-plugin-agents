@@ -107,3 +107,44 @@ func TestApplyLockedSettings(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyLockedServerTransportAndParams(t *testing.T) {
+	const lockedURL = "https://mattermost.example.com"
+	tests := []struct {
+		name       string
+		args       []string
+		wantErr    string
+		wantParams []string
+	}{
+		{name: "locked values apply when nothing is passed", wantParams: []string{"read_channel.from"}},
+		{name: "the locked server URL may be repeated", args: []string{"--server-url", lockedURL + "/"}, wantParams: []string{"read_channel.from"}},
+		{name: "another server is refused", args: []string{"--server-url", "https://evil.example.com"}, wantErr: "--server-url / MM_SERVER_URL is fixed"},
+		{name: "another internal server is refused", args: []string{"--internal-server-url", "http://localhost:8065"}, wantErr: "--internal-server-url / MM_INTERNAL_SERVER_URL is fixed"},
+		{name: "another transport is refused", args: []string{"--transport", "http"}, wantErr: "--transport is fixed"},
+		{name: "a disabled parameter cannot be re-enabled", args: []string{"--disable-tool-params", "read_post.include_thread"}, wantErr: "--disable-tool-params / MM_DISABLE_TOOL_PARAMS is fixed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lockedServerURL, lockedTransport, lockedDisableToolParams = lockedURL, "stdio", "read_channel.from"
+			mmServerURL, mmInternalServerURL, transport, disabledToolParams = "", "", "", nil
+			t.Cleanup(func() {
+				lockedServerURL, lockedTransport, lockedDisableToolParams = "", "", ""
+				mmServerURL, mmInternalServerURL, transport, disabledToolParams = "", "", "", nil
+			})
+
+			cmd := newRootCmd()
+			require.NoError(t, cmd.ParseFlags(tt.args))
+
+			err := applyLockedSettings(cmd)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, lockedURL, mmServerURL)
+			assert.Empty(t, mmInternalServerURL)
+			assert.Equal(t, tt.wantParams, disabledToolParams)
+		})
+	}
+}

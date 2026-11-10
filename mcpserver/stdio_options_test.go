@@ -133,6 +133,29 @@ func TestStdioServerOptions(t *testing.T) {
 		_, err := listStdioTools(t, StdioConfig{AccessMode: "anywhere"})
 		assert.Error(t, err)
 	})
+	t.Run("a disabled parameter leaves the schema and is refused in calls", func(t *testing.T) {
+		session, err := connectStdio(t, StdioConfig{DisabledToolParams: []string{"read_channel.from"}})
+		require.NoError(t, err)
+		listed, err := session.ListTools(context.Background(), nil)
+		require.NoError(t, err)
+		for _, tool := range listed.Tools {
+			if tool.Name == "read_channel" {
+				assert.False(t, schemaHasProperty(t, tool, "from"))
+				assert.True(t, schemaHasProperty(t, tool, "since"))
+				assert.Contains(t, tool.Description, "Not available on this server: from.")
+			}
+		}
+		result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+			Name:      "read_channel",
+			Arguments: map[string]any{"channel_id": "abcdefghijklmnopqrstuvwxyz", "from": "jdoe"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Content)
+		text, ok := result.Content[0].(*mcp.TextContent)
+		require.True(t, ok)
+		assert.True(t, result.IsError)
+		assert.Contains(t, text.Text, `parameter "from" of read_channel is not available on this server`)
+	})
 	t.Run("remote mode refuses to upload a local file", func(t *testing.T) {
 		session, err := connectStdio(t, StdioConfig{AccessMode: "remote"})
 		require.NoError(t, err)

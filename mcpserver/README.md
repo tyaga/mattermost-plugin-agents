@@ -176,15 +176,21 @@ Create a post as a specific user using username/password login. Simply provide t
 - `--access-mode`: stdio only. `local` (default) lets tools read local files for post attachments and `upload_file`; `remote` disables local file access, as on the plugin-hosted endpoint (or set `MM_ACCESS_MODE`)
 - `--disable-semantic-search`: Use keyword search only, for servers where the Agents plugin has no semantic search (or set `MM_DISABLE_SEMANTIC_SEARCH=true`)
 
-**Settings fixed at build time:** a binary distributed with a policy its users must not widen can fix `--tool-names`, `--access-mode`, `--disable-semantic-search` and `--track-ai-generated` with `-ldflags`:
+- `--disable-tool-params`: Comma-separated `tool.param` entries, e.g. `read_channel.from,search_posts.from` (or set `MM_DISABLE_TOOL_PARAMS`). A listed parameter leaves the tool's schema and a call that sets it is refused. Only optional parameters can be listed; an unknown tool or parameter stops the server at startup
+
+**Settings fixed at build time:** a binary distributed with a policy its users must not widen can fix `--tool-names`, `--access-mode`, `--disable-semantic-search`, `--track-ai-generated`, `--disable-tool-params`, `--server-url` and `--transport` with `-ldflags`:
 
 ```bash
-go build -ldflags "-X main.lockedToolNames=read_channel,read_post,search_posts \
+go build -ldflags "-X main.version=1.2.3 \
+  -X main.lockedToolNames=read_channel,read_post,search_posts \
   -X main.lockedAccessMode=remote -X main.lockedDisableSemanticSearch=true \
-  -X main.lockedTrackAIGenerated=true" -o mattermost-mcp-server ./mcpserver/cmd/
+  -X main.lockedTrackAIGenerated=true \
+  -X main.lockedDisableToolParams=read_channel.from \
+  -X main.lockedServerURL=https://mattermost.example.com \
+  -X main.lockedTransport=stdio" -o mattermost-mcp-server ./mcpserver/cmd/
 ```
 
-A fixed setting overrides its flag and environment variable; passing a different value at startup stops the server. `--help` marks fixed flags.
+A fixed setting overrides its flag and environment variable; passing a different value at startup stops the server. A fixed server URL is the only host the access token is sent to: it also rules out `--internal-server-url`. `--help` marks fixed flags. `-X main.version` sets what `--version` prints.
 - `--version`: Show version information
 
 **HTTP Transport Options** (when `--transport=http` — development and local use only, not for production; see the intro):

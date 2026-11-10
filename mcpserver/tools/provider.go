@@ -105,6 +105,9 @@ type ServerConfig interface {
 	GetReadOnlyTools() bool
 	// GetToolNames names the tools to register; empty means all.
 	GetToolNames() []string
+	// GetDisabledToolParams lists "tool.param" entries to drop from tool
+	// schemas and refuse in calls.
+	GetDisabledToolParams() []string
 }
 
 // SemanticSearchService provides semantic search capabilities for the MCP server.
@@ -128,6 +131,7 @@ type MattermostToolProvider struct {
 	toolGroupFilter         []string              // Tool groups to register; empty means all
 	readOnlyTools           bool                  // Register only tools that retrieve data
 	toolNameFilter          []string              // Tool names to register; empty means all
+	disabledParams          map[string][]string   // Tool name -> parameters dropped from its schema and refused in calls
 	searchService           SemanticSearchService // Optional semantic search service, can be nil
 	fileContentService      FileContentService    // Optional file content service for read_file, can be nil
 	allowStateChangingTools func() bool           // Evaluated per request; nil fails closed
@@ -158,6 +162,7 @@ func NewMattermostToolProvider(authProvider auth.AuthenticationProvider, logger 
 		toolGroupFilter:         config.GetToolGroups(),
 		readOnlyTools:           config.GetReadOnlyTools(),
 		toolNameFilter:          config.GetToolNames(),
+		disabledParams:          disabledParamsByTool(config.GetDisabledToolParams()),
 		searchService:           searchService,
 		fileContentService:      fileContentService,
 		allowStateChangingTools: allowStateChangingTools,
@@ -235,10 +240,65 @@ func (p *MattermostToolProvider) mcpTools() []MCPTool {
 			if len(p.toolNameFilter) > 0 && !slices.Contains(p.toolNameFilter, tool.Name) {
 				continue
 			}
+			if disabled := p.disabledParams[tool.Name]; len(disabled) > 0 {
+				excluded := make(map[string]bool, len(disabled))
+				for _, param := range disabled {
+					excluded[param] = true
+				}
+				tool.Schema = schemaWithoutProperties(tool.Schema, excluded)
+				tool.Description += " Not available on this server: " + strings.Join(disabled, ", ") + "."
+			}
 			mcpTools = append(mcpTools, tool)
 		}
 	}
 	return mcpTools
+}
+
+// disabledParamsByTool groups "tool.param" entries by tool; entries without a
+// dot are dropped (ValidateDisabledToolParams reports them at startup).
+func disabledParamsByTool(entries []string) map[string][]string {
+	byTool := map[string][]string{}
+	for _, entry := range entries {
+		tool, param, ok := strings.Cut(strings.TrimSpace(entry), ".")
+		if !ok || tool == "" || param == "" || slices.Contains(byTool[tool], param) {
+			continue
+		}
+		byTool[tool] = append(byTool[tool], param)
+	}
+	return byTool
+}
+
+// paramDisabled reports whether calls to tool may not set param.
+func (p *MattermostToolProvider) paramDisabled(tool, param string) bool {
+	return slices.Contains(p.disabledParams[tool], param)
+}
+
+// ValidateDisabledToolParams checks that every entry is "tool.param" naming an
+// optional parameter of a known tool, so a typo cannot leave a parameter
+// enabled.
+func ValidateDisabledToolParams(entries []string) error {
+	p := &MattermostToolProvider{devMode: true, accessMode: AccessModeLocal}
+	schemas := map[string]*jsonschema.Schema{}
+	for _, tool := range p.mcpTools() {
+		schemas[tool.Name] = tool.Schema
+	}
+	for _, entry := range entries {
+		tool, param, ok := strings.Cut(strings.TrimSpace(entry), ".")
+		if !ok || tool == "" || param == "" {
+			return fmt.Errorf("invalid disabled tool parameter %q (want tool.param)", entry)
+		}
+		schema, known := schemas[tool]
+		if !known {
+			return fmt.Errorf("disabled tool parameter %q: unknown tool %q", entry, tool)
+		}
+		if schema == nil || schema.Properties[param] == nil {
+			return fmt.Errorf("disabled tool parameter %q: tool %q has no parameter %q", entry, tool, param)
+		}
+		if slices.Contains(schema.Required, param) {
+			return fmt.Errorf("disabled tool parameter %q: %q is required by %q", entry, param, tool)
+		}
+	}
+	return nil
 }
 
 // ToolNames returns the names of the tools this provider will register.
@@ -386,6 +446,17 @@ func (p *MattermostToolProvider) registerDynamicTool(server *mcp.Server, mcpTool
 				return fmt.Errorf("failed to marshal arguments: %w", marshalErr)
 			}
 
+			if disabled := p.disabledParams[mcpTool.Name]; len(disabled) > 0 {
+				var passed map[string]json.RawMessage
+				if json.Unmarshal(argumentsBytes, &passed) == nil {
+					for _, param := range disabled {
+						if _, set := passed[param]; set {
+							return fmt.Errorf("parameter %q of %s is not available on this server", param, mcpTool.Name)
+						}
+					}
+				}
+			}
+
 			// Validate access restrictions before unmarshaling
 			if validationErr := validateAccessRestrictions(argumentsBytes, target, string(mcpContext.AccessMode)); validationErr != nil {
 				return fmt.Errorf("access validation failed: %w", validationErr)
@@ -508,8 +579,12 @@ func NewJSONSchemaForAccessMode[T any](accessMode string) *jsonschema.Schema {
 	}
 
 	// Identify the properties the current access mode is not allowed to set.
-	excluded := excludedFieldsForAccessMode(reflect.TypeFor[T](), accessMode)
-	if len(excluded) == 0 {
+	return schemaWithoutProperties(baseSchema, excludedFieldsForAccessMode(reflect.TypeFor[T](), accessMode))
+}
+
+// schemaWithoutProperties returns baseSchema without the excluded properties.
+func schemaWithoutProperties(baseSchema *jsonschema.Schema, excluded map[string]bool) *jsonschema.Schema {
+	if baseSchema == nil || len(excluded) == 0 {
 		return baseSchema
 	}
 

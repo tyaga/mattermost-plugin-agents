@@ -40,6 +40,10 @@ type BaseConfig struct {
 	// DisableSemanticSearch keeps search_posts to keyword search, as on a
 	// server where the Agents plugin has no semantic search.
 	DisableSemanticSearch bool `json:"disable_semantic_search,omitempty"`
+
+	// DisabledToolParams lists "tool.param" entries (e.g. "read_channel.from")
+	// dropped from tool schemas and refused in calls.
+	DisabledToolParams []string `json:"disabled_tool_params,omitempty"`
 }
 
 // GetMMServerURL returns the Mattermost server URL
@@ -74,6 +78,11 @@ func (c BaseConfig) GetReadOnlyTools() bool {
 // GetToolNames returns the tool names to register; empty means all.
 func (c BaseConfig) GetToolNames() []string {
 	return c.ToolNames
+}
+
+// GetDisabledToolParams returns the "tool.param" entries to disable.
+func (c BaseConfig) GetDisabledToolParams() []string {
+	return c.DisabledToolParams
 }
 
 // GetCompactOutput returns whether tool results use the compact post layout.

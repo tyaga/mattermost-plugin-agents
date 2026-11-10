@@ -600,3 +600,29 @@ func TestPostListingsIncludePermalinks(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateDisabledToolParams(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries []string
+		wantErr string
+	}{
+		{"optional parameters of known tools", []string{"read_channel.from", "search_posts.in"}, ""},
+		{"nothing to disable", nil, ""},
+		{"entry without a parameter", []string{"read_channel"}, "want tool.param"},
+		{"unknown tool", []string{"read_everything.from"}, `unknown tool "read_everything"`},
+		{"unknown parameter", []string{"read_channel.author"}, `has no parameter "author"`},
+		{"required parameter", []string{"read_channel.channel_id"}, "is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateDisabledToolParams(tt.entries)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
