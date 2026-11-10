@@ -103,6 +103,8 @@ type ServerConfig interface {
 	GetToolGroups() []string
 	// GetReadOnlyTools drops tools that change state in Mattermost.
 	GetReadOnlyTools() bool
+	// GetToolNames names the tools to register; empty means all.
+	GetToolNames() []string
 }
 
 // SemanticSearchService provides semantic search capabilities for the MCP server.
@@ -125,6 +127,7 @@ type MattermostToolProvider struct {
 	compactOutput           bool                  // Render posts in the compact layout
 	toolGroupFilter         []string              // Tool groups to register; empty means all
 	readOnlyTools           bool                  // Register only tools that retrieve data
+	toolNameFilter          []string              // Tool names to register; empty means all
 	searchService           SemanticSearchService // Optional semantic search service, can be nil
 	fileContentService      FileContentService    // Optional file content service for read_file, can be nil
 	allowStateChangingTools func() bool           // Evaluated per request; nil fails closed
@@ -154,6 +157,7 @@ func NewMattermostToolProvider(authProvider auth.AuthenticationProvider, logger 
 		compactOutput:           config.GetCompactOutput(),
 		toolGroupFilter:         config.GetToolGroups(),
 		readOnlyTools:           config.GetReadOnlyTools(),
+		toolNameFilter:          config.GetToolNames(),
 		searchService:           searchService,
 		fileContentService:      fileContentService,
 		allowStateChangingTools: allowStateChangingTools,
@@ -211,6 +215,13 @@ func ToolGroupNames() []string {
 	return names
 }
 
+// AllToolNames returns every tool name the name filter accepts, dev tools
+// included.
+func AllToolNames() []string {
+	p := &MattermostToolProvider{devMode: true, accessMode: AccessModeLocal}
+	return p.ToolNames()
+}
+
 func (p *MattermostToolProvider) mcpTools() []MCPTool {
 	var mcpTools []MCPTool
 	for _, group := range p.toolGroups() {
@@ -219,6 +230,9 @@ func (p *MattermostToolProvider) mcpTools() []MCPTool {
 		}
 		for _, tool := range group.tools() {
 			if p.readOnlyTools && !tool.ReadOnly {
+				continue
+			}
+			if len(p.toolNameFilter) > 0 && !slices.Contains(p.toolNameFilter, tool.Name) {
 				continue
 			}
 			mcpTools = append(mcpTools, tool)

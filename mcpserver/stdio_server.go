@@ -28,6 +28,10 @@ func NewStdioServer(config StdioConfig, logger loggerlib.Logger, searchService t
 	if config.PersonalAccessToken == "" {
 		return nil, fmt.Errorf("personal access token cannot be empty")
 	}
+	accessMode, err := stdioAccessMode(config.AccessMode)
+	if err != nil {
+		return nil, err
+	}
 
 	if logger == nil {
 		var err error
@@ -68,11 +72,13 @@ func NewStdioServer(config StdioConfig, logger loggerlib.Logger, searchService t
 	if fileContentService == nil {
 		fileContentService = defaultFileContentService
 	}
+	if config.DisableSemanticSearch {
+		searchService = nil
+	}
 
-	// Register tools with local access mode. Standalone stdio servers run
-	// outside the plugin and have no license information, so state-changing
-	// tools stay available.
-	mattermostServer.registerTools(tools.AccessModeLocal, searchService, fileContentService, func() bool { return true })
+	// Standalone stdio servers run outside the plugin and have no license
+	// information, so state-changing tools stay available.
+	mattermostServer.registerTools(accessMode, searchService, fileContentService, func() bool { return true })
 
 	return mattermostServer, nil
 }
@@ -104,4 +110,17 @@ func (s *MattermostMCPServer) serveStdio() error {
 		s.logger.Info("MCP server stopped gracefully")
 	}
 	return err
+}
+
+// stdioAccessMode maps StdioConfig.AccessMode to a tools.AccessMode; empty
+// means local.
+func stdioAccessMode(mode string) (tools.AccessMode, error) {
+	switch mode {
+	case "", string(tools.AccessModeLocal):
+		return tools.AccessModeLocal, nil
+	case string(tools.AccessModeRemote):
+		return tools.AccessModeRemote, nil
+	default:
+		return "", fmt.Errorf("unknown access mode %q (use local or remote)", mode)
+	}
 }

@@ -172,6 +172,19 @@ Create a post as a specific user using username/password login. Simply provide t
 - `--compact`: Render posts in tool results as a one-line header (time, author, IDs) followed by the message, instead of one labeled line per field (or set `MM_COMPACT_OUTPUT=true`)
 - `--tools`: Comma-separated tool groups to register, e.g. `channels,posts,threads,search` (or set `MM_TOOL_GROUPS`); `--help` lists the groups. Fewer tools mean a smaller tool catalog for the client to load and search
 - `--read-only`: Register only tools that retrieve data (or set `MM_READ_ONLY=true`)
+- `--tool-names`: Comma-separated tool names to register, applied on top of `--tools` and `--read-only` (or set `MM_TOOL_NAMES`). An unknown name stops the server at startup
+- `--access-mode`: stdio only. `local` (default) lets tools read local files for post attachments and `upload_file`; `remote` disables local file access, as on the plugin-hosted endpoint (or set `MM_ACCESS_MODE`)
+- `--disable-semantic-search`: Use keyword search only, for servers where the Agents plugin has no semantic search (or set `MM_DISABLE_SEMANTIC_SEARCH=true`)
+
+**Settings fixed at build time:** a binary distributed with a policy its users must not widen can fix `--tool-names`, `--access-mode`, `--disable-semantic-search` and `--track-ai-generated` with `-ldflags`:
+
+```bash
+go build -ldflags "-X main.lockedToolNames=read_channel,read_post,search_posts \
+  -X main.lockedAccessMode=remote -X main.lockedDisableSemanticSearch=true \
+  -X main.lockedTrackAIGenerated=true" -o mattermost-mcp-server ./mcpserver/cmd/
+```
+
+A fixed setting overrides its flag and environment variable; passing a different value at startup stops the server. `--help` marks fixed flags.
 - `--version`: Show version information
 
 **HTTP Transport Options** (when `--transport=http` — development and local use only, not for production; see the intro):

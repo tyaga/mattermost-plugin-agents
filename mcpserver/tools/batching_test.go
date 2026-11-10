@@ -522,17 +522,20 @@ func TestToolGroupFilter(t *testing.T) {
 	tests := []struct {
 		name     string
 		groups   []string
+		names    []string
 		readOnly bool
 		want     []string
 		notWant  []string
 	}{
-		{"default registers everything", nil, false, []string{"read_channel", "create_post", "search_posts", "get_me"}, nil},
-		{"groups limit the catalog", []string{"channels", "search"}, false, []string{"read_channel", "get_active_channels", "search_posts", "create_channel"}, []string{"create_post", "get_me"}},
-		{"read-only drops state-changing tools", []string{"channels", "posts"}, true, []string{"read_channel", "read_post"}, []string{"create_channel", "create_post", "dm"}},
+		{"default registers everything", nil, nil, false, []string{"read_channel", "create_post", "search_posts", "get_me"}, nil},
+		{"groups limit the catalog", []string{"channels", "search"}, nil, false, []string{"read_channel", "get_active_channels", "search_posts", "create_channel"}, []string{"create_post", "get_me"}},
+		{"read-only drops state-changing tools", []string{"channels", "posts"}, nil, true, []string{"read_channel", "read_post"}, []string{"create_channel", "create_post", "dm"}},
+		{"names keep only the listed tools", nil, []string{"read_channel", "dm"}, false, []string{"read_channel", "dm"}, []string{"read_post", "create_post", "get_active_channels"}},
+		{"names combine with read-only", nil, []string{"read_channel", "dm"}, true, []string{"read_channel"}, []string{"dm"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := &MattermostToolProvider{accessMode: AccessModeLocal, toolGroupFilter: tt.groups, readOnlyTools: tt.readOnly, logger: &testLogger{t: t}}
+			p := &MattermostToolProvider{accessMode: AccessModeLocal, toolGroupFilter: tt.groups, toolNameFilter: tt.names, readOnlyTools: tt.readOnly, logger: &testLogger{t: t}}
 			names := p.ToolNames()
 			for _, want := range tt.want {
 				assert.Contains(t, names, want)
@@ -544,6 +547,8 @@ func TestToolGroupFilter(t *testing.T) {
 	}
 	assert.Contains(t, ToolGroupNames(), "channels")
 	assert.Contains(t, ToolGroupNames(), "dev")
+	assert.Contains(t, AllToolNames(), "read_channel")
+	assert.Contains(t, AllToolNames(), "create_user")
 }
 
 // Post listings carry a link that opens each post in the client, built from

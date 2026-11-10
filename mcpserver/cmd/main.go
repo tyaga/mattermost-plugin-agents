@@ -33,9 +33,18 @@ var (
 	compactOutput       bool
 	toolGroups          []string
 	readOnlyTools       bool
+	toolNames           []string
+	accessMode          string
+	disableSemantic     bool
 )
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "mattermost-mcp-server",
 		Short: "Mattermost Model Context Protocol (MCP) Server",
@@ -66,15 +75,17 @@ Authentication is handled via Personal Access Tokens (PAT).`,
 
 	rootCmd.Flags().StringSliceVar(&toolGroups, "tools", nil, "Comma-separated tool groups to register (default: all; or set MM_TOOL_GROUPS). Groups: "+strings.Join(tools.ToolGroupNames(), ", "))
 	rootCmd.Flags().BoolVar(&readOnlyTools, "read-only", false, "Register only tools that retrieve data (or set MM_READ_ONLY=true)")
+	rootCmd.Flags().StringSliceVar(&toolNames, "tool-names", nil, "Comma-separated tool names to register, applied on top of --tools and --read-only (default: all; or set MM_TOOL_NAMES)")
+	rootCmd.Flags().StringVar(&accessMode, "access-mode", "local", "stdio only: 'local' lets tools read local files for attachments and uploads, 'remote' disables local file access (or set MM_ACCESS_MODE)")
+	rootCmd.Flags().BoolVar(&disableSemantic, "disable-semantic-search", false, "Use keyword search only, for servers without semantic search in the Agents plugin (or set MM_DISABLE_SEMANTIC_SEARCH=true)")
 
 	// AI tracking flag
 	rootCmd.Flags().Bool("track-ai-generated", false, "Track AI-generated content in posts (default: false for stdio, true for http)")
 
 	// Note: We don't mark flags as required since they can also come from environment variables
 
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	describeLockedSettings(rootCmd)
+	return rootCmd
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
@@ -122,6 +133,40 @@ func runServer(cmd *cobra.Command, args []string) error {
 		readOnlyTools, _ = strconv.ParseBool(os.Getenv("MM_READ_ONLY"))
 	}
 
+	if !cmd.Flags().Changed("tool-names") {
+		if env := os.Getenv("MM_TOOL_NAMES"); env != "" {
+			toolNames = strings.Split(env, ",")
+		}
+	}
+	for i, name := range toolNames {
+		toolNames[i] = strings.TrimSpace(name)
+	}
+
+	if !cmd.Flags().Changed("access-mode") {
+		if env := os.Getenv("MM_ACCESS_MODE"); env != "" {
+			accessMode = env
+		}
+	}
+
+	if !cmd.Flags().Changed("disable-semantic-search") {
+		disableSemantic, _ = strconv.ParseBool(os.Getenv("MM_DISABLE_SEMANTIC_SEARCH"))
+	}
+
+	if lockErr := applyLockedSettings(cmd); lockErr != nil {
+		logger.Error("setting fixed at build time", "error", lockErr)
+		logger.Flush()
+		return lockErr
+	}
+
+	knownTools := tools.AllToolNames()
+	for _, name := range toolNames {
+		if !slices.Contains(knownTools, name) {
+			logger.Error("unknown tool name", "tool", name)
+			logger.Flush()
+			return fmt.Errorf("unknown tool name %q", name)
+		}
+	}
+
 	if !cmd.Flags().Changed("compact") {
 		compactOutput, _ = strconv.ParseBool(os.Getenv("MM_COMPACT_OUTPUT"))
 	}
@@ -161,14 +206,17 @@ func runServer(cmd *cobra.Command, args []string) error {
 	case "stdio":
 		// Create STDIO transport configuration
 		stdioConfig := mcpserver.StdioConfig{
-			MMServerURL:         mmServerURL,
-			MMInternalServerURL: mmInternalServerURL,
-			DevMode:             devMode,
-			TrackAIGenerated:    trackAIGenerated,
-			CompactOutput:       compactOutput,
-			ToolGroups:          toolGroups,
-			ReadOnlyTools:       readOnlyTools,
-			PersonalAccessToken: token,
+			MMServerURL:           mmServerURL,
+			MMInternalServerURL:   mmInternalServerURL,
+			DevMode:               devMode,
+			TrackAIGenerated:      trackAIGenerated,
+			CompactOutput:         compactOutput,
+			ToolGroups:            toolGroups,
+			ReadOnlyTools:         readOnlyTools,
+			ToolNames:             toolNames,
+			DisableSemanticSearch: disableSemantic,
+			PersonalAccessToken:   token,
+			AccessMode:            accessMode,
 		}
 
 		mcpServer, err = mcpserver.NewStdioServer(stdioConfig, logger, nil, nil)
@@ -176,17 +224,19 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// Create HTTP transport configuration
 		stateless, _ := cmd.Flags().GetBool("stateless")
 		httpConfig := mcpserver.HTTPConfig{
-			MMServerURL:         mmServerURL,
-			MMInternalServerURL: mmInternalServerURL,
-			DevMode:             devMode,
-			TrackAIGenerated:    trackAIGenerated,
-			CompactOutput:       compactOutput,
-			ToolGroups:          toolGroups,
-			ReadOnlyTools:       readOnlyTools,
-			HTTPPort:            httpPort,
-			HTTPBindAddr:        httpBindAddr,
-			SiteURL:             siteURL,
-			Stateless:           stateless,
+			MMServerURL:           mmServerURL,
+			MMInternalServerURL:   mmInternalServerURL,
+			DevMode:               devMode,
+			TrackAIGenerated:      trackAIGenerated,
+			CompactOutput:         compactOutput,
+			ToolGroups:            toolGroups,
+			ReadOnlyTools:         readOnlyTools,
+			ToolNames:             toolNames,
+			DisableSemanticSearch: disableSemantic,
+			HTTPPort:              httpPort,
+			HTTPBindAddr:          httpBindAddr,
+			SiteURL:               siteURL,
+			Stateless:             stateless,
 		}
 
 		mcpServer, err = mcpserver.NewHTTPServer(httpConfig, logger)

@@ -31,6 +31,15 @@ type BaseConfig struct {
 
 	// ReadOnlyTools registers only tools that retrieve data.
 	ReadOnlyTools bool `json:"read_only_tools,omitempty"`
+
+	// ToolNames limits the registered tools to these names (see
+	// tools.AllToolNames); empty registers every tool. Applied together with
+	// ToolGroups and ReadOnlyTools.
+	ToolNames []string `json:"tool_names,omitempty"`
+
+	// DisableSemanticSearch keeps search_posts to keyword search, as on a
+	// server where the Agents plugin has no semantic search.
+	DisableSemanticSearch bool `json:"disable_semantic_search,omitempty"`
 }
 
 // GetMMServerURL returns the Mattermost server URL
@@ -62,6 +71,11 @@ func (c BaseConfig) GetReadOnlyTools() bool {
 	return c.ReadOnlyTools
 }
 
+// GetToolNames returns the tool names to register; empty means all.
+func (c BaseConfig) GetToolNames() []string {
+	return c.ToolNames
+}
+
 // GetCompactOutput returns whether tool results use the compact post layout.
 func (c BaseConfig) GetCompactOutput() bool {
 	return c.CompactOutput
@@ -82,6 +96,11 @@ type StdioConfig struct {
 
 	// Personal Access Token for authentication
 	PersonalAccessToken string `json:"personal_access_token"`
+
+	// AccessMode is "local" (default: tools may read local files for uploads
+	// and attachments) or "remote" (no local file access, as on the plugin
+	// endpoint).
+	AccessMode string `json:"access_mode,omitempty"`
 }
 
 // GetTrackAIGenerated returns whether to track AI-generated content
